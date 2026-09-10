@@ -379,20 +379,109 @@ This enables direct client-side playback without proxying video bandwidth throug
 
 ---
 
-## 7. Automatic Fallback & Cascade Algorithm
+---
 
-If a specific cluster is down or under maintenance, the scraper cascades automatically:
+## 7. Dual-Layer Auto-Failover Cascade & HLS Fatal Error Recovery
+
+A fundamental principle of resilient video streaming: **A scrape is NOT successful merely because the API returned an HTTP 200 with an M3U8 link.**
+
+### The Core Definition of "Failure"
+
+In video streaming, failure happens at two distinct layers:
+
+1. **Backend / Scrape Failure**:
+   - `/api/stream` returns HTTP 4xx/5xx.
+   - `/api/stream` returns an empty sources array: `sources: []`.
+2. **Playback Runtime Failure ("Failed" = HLS Fatal Error)**:
+   - The API returned an M3U8 URL, but when loaded into Hls.js or the browser engine, it triggers an **HLS Fatal Error** (`data.fatal === true`).
+   - Common causes of HLS fatal errors:
+     - **Manifest 404/410**: Video removed or path expired on the CDN.
+     - **Token Expiry (403 Forbidden)**: `expire` timestamp elapsed or signature failed.
+     - **ISP / DNS Domain Blocking**: Local ISP (e.g. Jio, Airtel, Vodafone) blocked the CDN domain (`img1.nxocw.com`).
+     - **CORS Failure**: Origin headers rejected by client browser.
+     - **Buffer Stalling & Corrupt Segments**: Non-recoverable `Hls.ErrorTypes.MEDIA_ERROR`.
+
+---
+
+### Step-by-Step Auto-Failover Cascade
+
+Our scraper and video players **must proceed step-by-step through the server clusters**. If server 1 fails with an HLS fatal error, the player must immediately and automatically step to server 2, then server 3, without requiring user intervention:
+
+```
+[ s62: Bastion ]  ──(HLS Fatal Error)──►  [ s70: Polaris ]  ──(HLS Fatal Error)──►  [ s40: DarkMatter ]
+                                                                                            │
+                                                                                    (HLS Fatal Error)
+                                                                                            ▼
+[ Embed Iframes Fallback ]  ◄──(HLS Fatal Error)──  [ s60: Vertex ]  ◄──(HLS Fatal Error)──  [ s3: Edmunds ]
+```
+
+---
+
+### Client-Side HLS Fatal Error Failover Implementation
+
+In web players (`hls.js`), developers must listen to `Hls.Events.ERROR` and execute the step-by-step failover:
 
 ```javascript
-const SERVERS = ['s62', 's40', 's70', 's3', 's60'];
+const CASCADE_SERVERS = ['s62', 's70', 's40', 's3', 's60'];
+let currentServerIndex = 0;
+
+function setupHlsPlayer(m3u8Url, mediaInfo) {
+  if (hlsInstance) hlsInstance.destroy();
+
+  hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: true });
+  hlsInstance.loadSource(m3u8Url);
+  hlsInstance.attachMedia(videoElement);
+
+  // CRITICAL: Step-by-step failover on HLS fatal error
+  hlsInstance.on(Hls.Events.ERROR, async (event, data) => {
+    if (data.fatal) {
+      console.warn(`[CASCADE] HLS Fatal Error on server [${CASCADE_SERVERS[currentServerIndex]}]:`, data.details);
+      
+      // Destroy current broken instance
+      hlsInstance.destroy();
+
+      // Step to next scraper server
+      currentServerIndex++;
+      if (currentServerIndex < CASCADE_SERVERS.length) {
+        const nextServer = CASCADE_SERVERS[currentServerIndex];
+        console.log(`[CASCADE] Stepping automatically to next server: [${nextServer}]...`);
+        
+        // Re-scrape with next server ID
+        const nextStream = await fetchStreamFromServer(mediaInfo.type, mediaInfo.id, nextServer);
+        if (nextStream && nextStream.primaryM3u8) {
+          setupHlsPlayer(nextStream.primaryM3u8, mediaInfo);
+          return;
+        }
+      }
+
+      // If all HLS server clusters encounter fatal errors, transition to embed iframe
+      console.error('[CASCADE] All HLS scraper clusters failed. Falling back to embed player.');
+      switchToEmbedFallback(mediaInfo);
+    }
+  });
+}
+```
+
+---
+
+### Backend Auto-Cascade (Query Phase)
+
+Before video playback begins, the backend library (`scraper.js`) implements Phase 1 cascade:
+
+```javascript
+const SERVERS = ['s62', 's70', 's40', 's3', 's60'];
 
 for (const srv of SERVERS) {
-  const result = await queryServer(srv, mediaType, tmdbId, query);
-  if (result && result.sources && result.sources.length > 0) {
-    return result; // First successful working stream found
+  try {
+    const result = await queryServer(srv, mediaType, tmdbId, query);
+    if (result && result.sources && result.sources.length > 0) {
+      return result; // First successful working scrape found
+    }
+  } catch (err) {
+    // Continue to next server cluster
   }
 }
-// If all primary scrapers fail, return embed fallback URLs
+// If all primary scrapers fail to return sources, return embed fallback URLs
 return fallbackEmbeds;
 ```
 

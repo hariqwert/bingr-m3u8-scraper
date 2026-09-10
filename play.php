@@ -274,6 +274,24 @@ $subtitles = (isset($subResult['subtitles']) && is_array($subResult['subtitles']
             });
           }
         });
+
+        // Step-by-step auto-failover on HLS fatal error
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            console.warn('HLS Fatal Error on server [<?= $usedSrv ?>]:', data.details);
+            const serverKeys = <?= json_encode(array_keys($servers)) ?>;
+            const currentIdx = serverKeys.indexOf('<?= $usedSrv ?>');
+            if (currentIdx !== -1 && currentIdx + 1 < serverKeys.length) {
+              const nextServer = serverKeys[currentIdx + 1];
+              console.log('Auto-stepping to next scraper server: ' + nextServer);
+              const url = new URL(window.location.href);
+              url.searchParams.set('srv', nextServer);
+              window.location.href = url.toString();
+            } else {
+              alert('All scraper servers encountered HLS fatal errors. Please try again later.');
+            }
+          }
+        });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = primaryUrl;
       }
