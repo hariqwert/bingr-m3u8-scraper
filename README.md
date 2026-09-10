@@ -76,6 +76,20 @@ node server.js
 - `GET /sports/matches`
 - `GET /sports/stream/solaris/247-willow`
 
+### 4. Standalone PHP Video Player (`play.php`)
+Drop `play.php` onto any PHP-enabled server (Apache, Nginx, XAMPP):
+```bash
+# Play movie with default scraper (Bastion)
+http://localhost/play.php?tmdb=1108427
+
+# Play movie with multi-language audio dubs (Polaris)
+http://localhost/play.php?tmdb=1108427&srv=s70
+
+# Play TV episode with 85+ WebVTT subtitles
+http://localhost/play.php?tmdb=1396&type=tv&season=1&ep=1
+```
+Includes built-in **Scraper / Server Selector**, **Audio Dub Switcher**, **Subtitle Track Selector**, and **Quality Picker**.
+
 ---
 
 ## 🔄 Already Integrated the Old Scraper? (Upgrade Guide)
@@ -86,6 +100,7 @@ If your existing application previously integrated our scraper without dub audio
 2. **Inject WebVTT `<track>` elements** directly from the returned `result.subtitles` array.
 3. **Toggle Subtitles** dynamically using `video.textTracks[i].mode = 'showing' | 'disabled'`.
 4. **Enable Dual-Layer Audio Switching** to support both internal HLS v7 tracks and multi-source regional streams.
+5. **Add Mandatory Scraper Selection**: In video players (like `play.php`), always allow users to switch scrapers (`s62`, `s70`, `s40`) to bypass ISP blocks and access alternate language dubs.
 
 👉 **[Read the Full Upgrade & Drop-in Player Code in AGENTS.md](AGENTS.md#10-migration--upgrade-guide-for-existing-integrations)**
 

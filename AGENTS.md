@@ -728,6 +728,30 @@ function switchAudio(val) {
 
 ---
 
+### Step 3: Mandatory Requirement: Scraper / Server Selection in Video Players
+
+When integrating video playback in scripts like `play.php` or custom frontend video embeds, **you MUST provide a visible Scraper / Server Selection Option** (e.g., `<select name="srv">`).
+
+#### Why Hardcoding a Single Scraper Server is Forbidden:
+
+1. **ISP & DNS Blocking**: Default server `s62` (Bastion) relies on domains like `nxocw.com` and `knocw.com`. Many regional ISPs (e.g. Reliance Jio, Airtel, Turkish/European ISPs) block these domains. Switching to `s70` (Polaris on Cloudflare `hakunaymatata.com`) or `s40` (DarkMatter on `streamrip.fun`) immediately bypasses ISP blocks without needing a VPN.
+2. **Audio Dub & Language Availability**: Server `s62` serves pre-muxed single-audio streams. If a viewer wants to watch in English, Spanish, Russian, Kurdish, or Arabic, switching to server `s70` (Polaris) provides dedicated multi-language stream tracks.
+3. **Bitrate and Resolution Options**: Server `s40` (DarkMatter) provides high-bitrate 1080p StreamRip encodes, while server `s62` (Bastion) provides lightweight 720p/480p adaptive bitrate streams for mobile devices.
+4. **Resilience Against Outages**: If any scraper cluster is temporarily rate-limited or undergoes scheduled maintenance, allowing the user to switch scrapers guarantees zero downtime.
+
+#### Server Directory Reference:
+```html
+<select id="srvSelect" onchange="switchScraperServer(this.value)">
+  <option value="s62">Bastion (Default — KNOCW / NXOCW CDN)</option>
+  <option value="s70">Polaris (Multi-Language Dubs / HLS v7)</option>
+  <option value="s40">DarkMatter (StreamRip 1080p Direct)</option>
+  <option value="s3">Edmunds (Filmu Proxy)</option>
+  <option value="s60">Vertex (Alternate)</option>
+</select>
+```
+
+---
+
 ## 11. Multi-Language Implementation Reference
 
 ### A. Node.js Native
@@ -789,6 +813,23 @@ curl -X GET "https://api.bingr.one/api/subtitles/vdrk/movie/1108427" \
   -H "Referer: https://bingr.one/watch/movie/1108427"
 ```
 
+### D. PHP Native Implementation (`play.php`)
+
+A full, production-ready standalone PHP video player is available at [`play.php`](file:///c:/Users/HP/Pictures/Screenshots/ANIM/bingr-m3u8-scraper/play.php).
+
+#### How `play.php` Works:
+1. Accepts query parameters:
+   - `play.php?tmdb=1108427&srv=s62` (Movie on Bastion)
+   - `play.php?tmdb=1108427&srv=s70` (Movie on Polaris with multi-language dubs)
+   - `play.php?tmdb=1396&type=tv&season=1&ep=1` (TV Episode)
+2. Uses native PHP `curl` to query the selected scraper server (`/api/stream`) with bypass headers.
+3. Automatically catches multi-language WebVTT subtitles via `/api/subtitles/vdrk/{type}/{id}`.
+4. Renders a UI with:
+   - **Scraper / Server Selector dropdown** that re-requests streams from alternate clusters if one is blocked or failing.
+   - **Audio / Dub Language Selector** (switching between English, Hindi, Spanish, etc.).
+   - **Subtitle Selector** injecting HTML5 `<track>` tags with `crossorigin="anonymous"`.
+   - **Quality Selector** powered by HLS.js.
+
 ---
 
 ## 12. Agentic Guidelines & Maintenance Rules
@@ -801,5 +842,7 @@ When configuring, enhancing, or wrapping this scraper in subagents or automation
 4. **Never Proxy Video Chunks**: Stream segments directly to client browsers to save server compute and bandwidth since origin CDNs provide `Access-Control-Allow-Origin: *`.
 5. **Always Set `crossorigin="anonymous"` for Subtitles**: Web browsers require this tag on `<video>` elements to render third-party WebVTT captions without CORS failures.
 6. **Multi-Audio Handling**: Use the dual-layer approach: check `hls.audioTracks` first; if empty, expose stream switching across `sources` with distinct language labels.
+7. **Mandatory Scraper Selection in Players**: Any video player implementation (such as `play.php`, embed pages, or wrapper applications) **MUST** expose a scraper server selection control. Never hardcode a single server cluster.
+
 
 
