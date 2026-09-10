@@ -262,6 +262,58 @@ function scrapeTvEpisode(tmdbId, season, episode, options = {}) {
   return scrapeStream({ type: 'tv', id: tmdbId, season, episode, ...options });
 }
 
+/**
+ * Fetch All Live & Upcoming Sports Matches Today
+ */
+async function getLiveSportsMatches() {
+  const [allToday, popular] = await Promise.all([
+    request('/sports/matches/all-today', { referer: 'https://bingr.one/sports' }),
+    request('/sports/matches/popular', { referer: 'https://bingr.one/sports' })
+  ]);
+
+  return {
+    today: Array.isArray(allToday.data) ? allToday.data : [],
+    popular: Array.isArray(popular.data) ? popular.data : []
+  };
+}
+
+/**
+ * Scrape Live Stream / M3U8 for a Sports Match
+ * @param {string} source - e.g. 'solaris'
+ * @param {string} matchId - e.g. '247-fox-footy'
+ */
+async function getMatchStream(source, matchId) {
+  if (!source || !matchId) throw new Error('Both source and matchId are required');
+  const pathname = `/sports/stream/${encodeURIComponent(source)}/${encodeURIComponent(matchId)}`;
+  const res = await request(pathname, { referer: 'https://bingr.one/sports' });
+  const streams = Array.isArray(res.data) ? res.data : [];
+
+  // Extract direct M3U8 URLs if available
+  const formatted = streams.map(s => {
+    let directM3u8 = null;
+    if (s.embedUrl && s.embedUrl.includes('.m3u8')) {
+      directM3u8 = s.embedUrl;
+    }
+    return {
+      id: s.id,
+      streamNo: s.streamNo,
+      language: s.language || 'Default',
+      hd: !!s.hd,
+      name: s.source || `Stream ${s.streamNo}`,
+      url: directM3u8 || s.embedUrl,
+      isM3u8: !!directM3u8,
+      embedUrl: s.embedUrl
+    };
+  });
+
+  return {
+    matchId,
+    source,
+    streams: formatted,
+    primaryStream: formatted.find(f => f.isM3u8) || formatted[0] || null
+  };
+}
+
 module.exports = {
   SERVERS,
   search,
@@ -270,5 +322,8 @@ module.exports = {
   getTvEpisodes,
   scrapeStream,
   scrapeMovie,
-  scrapeTvEpisode
+  scrapeTvEpisode,
+  getLiveSportsMatches,
+  getMatchStream
 };
+

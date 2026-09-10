@@ -13,14 +13,16 @@ Usage:
   node cli.js movie <tmdbId> [serverId]          Scrape live M3U8 stream for a movie
   node cli.js tv <tmdbId> <season> <episode>     Scrape live M3U8 stream for a specific TV episode
   node cli.js episodes <tmdbId> <season>         List all episodes in a TV season
+  node cli.js sports                             List today's live and upcoming sports matches
+  node cli.js sport-stream <source> <matchId>    Scrape live M3U8 for a sports match
   node cli.js servers                            List all active scraper server clusters
 
 Examples:
   node cli.js search "Kill"
   node cli.js movie 1108427
-  node cli.js movie 1108427 s62
   node cli.js tv 1396 1 1
-  node cli.js episodes 1396 1
+  node cli.js sports
+  node cli.js sport-stream solaris 247-fox-footy
 `);
 }
 
@@ -132,6 +134,41 @@ async function run() {
         console.error('\n❌ Scraper failed to extract stream.');
         console.error(result.error);
       }
+      return;
+    }
+
+    if (command === 'sports') {
+      console.log('🏟️  Fetching live and upcoming sports matches today...');
+      const matches = await scraper.getLiveSportsMatches();
+      const list = matches.today || [];
+      console.log(`\nFound ${list.length} match(es) today:\n`);
+
+      list.forEach((m, idx) => {
+        const teams = m.teams?.home?.name ? `${m.teams.home.name} vs ${m.teams.away?.name || 'TBA'}` : m.title;
+        const time = m.date ? new Date(m.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+        const sourceInfo = m.sources?.[0] ? `[src: ${m.sources[0].source} / id: ${m.sources[0].id}]` : '';
+        console.log(`• [${(m.category || 'LIVE').toUpperCase()}] ${teams} (${time}) ${sourceInfo}`);
+      });
+
+      console.log('\nTo scrape a stream, run: node cli.js sport-stream <source> <id>');
+      return;
+    }
+
+    if (command === 'sport-stream') {
+      const source = args[1];
+      const matchId = args[2];
+      if (!source || !matchId) {
+        console.error('Error: Please specify source and matchId. Example: node cli.js sport-stream solaris 247-fox-footy');
+        return;
+      }
+      console.log(`🚀 Scraping live stream for match: ${matchId} from source [${source}]...`);
+      const streamData = await scraper.getMatchStream(source, matchId);
+      console.log(`\nFound ${streamData.streams.length} stream source(s):`);
+
+      streamData.streams.forEach((s, idx) => {
+        console.log(`\n[Stream #${idx + 1}] ${s.name} (${s.language})`);
+        console.log(`  M3U8 / URL: ${s.url}`);
+      });
       return;
     }
 

@@ -55,10 +55,27 @@ const server = http.createServer(async (req, res) => {
           'GET  /tv/:tmdbId',
           'GET  /tv/:tmdbId/season/:seasonNumber',
           'GET  /tv/:tmdbId/season/:seasonNumber/episode/:episodeNumber/stream?srv={optional_server}',
+          'GET  /sports/matches',
+          'GET  /sports/stream/:source/:matchId',
           'GET  /servers',
           'POST /scrape'
         ]
       });
+    }
+
+    // 1b. Sports Matches List
+    if (pathname === '/sports/matches') {
+      const data = await scraper.getLiveSportsMatches();
+      return sendJson(res, 200, data);
+    }
+
+    // 1c. Sports Match Stream
+    const sportStreamMatch = pathname.match(/^\/sports\/stream\/([^\/]+)\/(.+)$/);
+    if (sportStreamMatch) {
+      const source = decodeURIComponent(sportStreamMatch[1]);
+      const matchId = decodeURIComponent(sportStreamMatch[2]);
+      const streamData = await scraper.getMatchStream(source, matchId);
+      return sendJson(res, 200, streamData);
     }
 
     // 2. Active Servers List

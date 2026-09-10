@@ -262,7 +262,90 @@ Content-Type: application/json
 
 ---
 
-## 6. HLS CDN Anatomy & Segment Masking
+## 6. Live Sports Scraping Specification (Matches & Streams)
+
+Bingr integrates an active sports scraping subsystem for live and upcoming athletic fixtures (Cricket, Football/Soccer, Tennis, Rugby, Golf, AFL, etc.).
+
+### Step 1: Discover Today's Live and Upcoming Matches
+
+```http
+GET https://api.bingr.one/api/sports/matches/all-today HTTP/1.1
+Host: api.bingr.one
+Origin: https://bingr.one
+Referer: https://bingr.one/sports
+```
+
+**Response Structure:**
+```json
+[
+  {
+    "id": "247-willow",
+    "title": "Willow Cricket",
+    "category": "cricket",
+    "date": 1789061144985,
+    "teams": {
+      "home": { "name": "Willow", "badge": "" },
+      "away": { "name": "", "badge": "" }
+    },
+    "sources": [
+      { "source": "solaris", "id": "247-willow" }
+    ]
+  },
+  {
+    "id": "ucl/2026-09-10/fen-roma",
+    "title": "Fenerbahce vs AS Roma",
+    "category": "football",
+    "date": 1789061144985,
+    "teams": {
+      "home": { "name": "Fenerbahce", "badge": "..." },
+      "away": { "name": "AS Roma", "badge": "..." }
+    },
+    "sources": [
+      { "source": "solaris", "id": "ucl/2026-09-10/fen-roma" }
+    ]
+  }
+]
+```
+
+### Step 2: Extract Live Match HLS Stream
+
+To scrape the live video sources for a match using its `source` and `id`:
+
+```http
+GET https://api.bingr.one/api/sports/stream/solaris/247-willow HTTP/1.1
+Host: api.bingr.one
+Origin: https://bingr.one
+Referer: https://bingr.one/sports
+```
+
+**Response Structure:**
+```json
+[
+  {
+    "id": "solaris-0",
+    "streamNo": 1,
+    "language": "Direct CDN",
+    "hd": false,
+    "embedUrl": "https://sports.streamrip.fun/proxy/m3u8?url=https%3A%2F%2Fmessi.damitv.st%2Flive-hls%2Fchannel%2F247-willow%2Fplaylist.m3u8...",
+    "source": "Main Stream (Direct CDN)"
+  },
+  {
+    "id": "solaris-1",
+    "streamNo": 2,
+    "language": "English",
+    "hd": false,
+    "embedUrl": "https://embedindia.st/embed/247-willow?gid=...",
+    "source": "Main Stream · Embed"
+  }
+]
+```
+
+#### Live Sports M3U8 Stream Format:
+The returned `embedUrl` containing `proxy/m3u8?url=...` is a direct, live Apple HLS playlist serving real-time video chunks with `Access-Control-Allow-Origin: *`.
+
+---
+
+## 7. HLS CDN Anatomy & Segment Masking
 
 The extracted HLS playlists use advanced CDN architectures designed for edge caching:
 
