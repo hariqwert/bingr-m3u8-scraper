@@ -398,7 +398,87 @@ return fallbackEmbeds;
 
 ---
 
-## 8. Multi-Language Implementation Reference
+---
+
+## 8. Multi-Audio & Multi-Language Architecture
+
+A common question when scraping M3U8 streams is: **Why does the audio track selector in standard HLS players stay empty?**
+
+### The Root Cause: Pre-Muxed vs Master HLS Streams
+
+Bingr uses multiple backend server clusters with fundamentally different encoding pipelines:
+
+#### 1. Pre-Muxed Streams (`s62` Bastion / `img1.nxocw.com` CDN)
+- When scraping default server `s62`, the CDN returns a stream like `Kill_Hindi_720/index_338.m3u8`.
+- In this manifest:
+  ```m3u8
+  #EXTM3U
+  #EXT-X-VERSION:3
+  #EXT-X-TARGETDURATION:10
+  #EXTINF:3.128122,
+  https://img.nxocw.com/hls_mps/.../720/0.jpg
+  ```
+- **No `#EXT-X-MEDIA:TYPE=AUDIO` tags exist.**
+- The audio (e.g., Hindi AAC) is **multiplexed directly into the MPEG-TS transport packets** alongside the H.264 video.
+- Because there are no separate audio playlists or elementary audio streams, standard web players (`hls.js`, `video.js`) report `hls.audioTracks = []`. You cannot toggle audio tracks inside that single M3U8 file.
+
+#### 2. Multi-Source Language Switching (`s70` Polaris)
+- Server `s70` (Polaris) handles multi-audio by returning **distinct stream URLs for each language**:
+  ```json
+  [
+    { "label": "Polaris — English 1080p", "url": "https://sacdn.hakunaymatata.com/.../master.m3u8" },
+    { "label": "Polaris — Hindi 1080p", "url": "https://sacdn.hakunaymatata.com/.../hindi_master.m3u8" },
+    { "label": "Polaris — Spanish 720p", "url": "https://sacdn.hakunaymatata.com/.../spanish.m3u8" },
+    { "label": "Polaris — Russian", "url": "https://sacdn.hakunaymatata.com/.../russian.m3u8" }
+  ]
+  ```
+- Audio switching is performed by switching the active stream URL rather than changing an internal HLS track.
+
+#### 3. True Master HLS Playlists with Multi-Audio Tracks
+- Select Polaris streams (HLS v7) include full `#EXT-X-MEDIA:TYPE=AUDIO` definitions:
+  ```m3u8
+  #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-aacl-128",NAME="English",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE="en",URI="v3.m3u8"
+  #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-aacl-128",NAME="Hindi",DEFAULT=NO,AUTOSELECT=YES,LANGUAGE="hi",URI="v4.m3u8"
+  ```
+- In these streams, `hls.js` fires `Hls.Events.AUDIO_TRACKS_UPDATED`, enabling instant in-stream language switching without re-buffering the video.
+
+#### 4. Dedicated Languages Endpoint (`/api/languages/`)
+- Querying the dedicated language directory endpoint returns additional localized streams:
+  ```http
+  GET https://api.bingr.one/api/languages/movie/1108427?title=Kill&year=2024 HTTP/1.1
+  Host: api.bingr.one
+  Origin: https://bingr.one
+  Referer: https://bingr.one/watch/movie/1108427
+  ```
+
+---
+
+### Universal Multi-Audio Solution for Web Players
+
+To support all sources seamlessly, CineStream (`bingr-player`) implements a **Dual-Layer Audio Selector**:
+
+```javascript
+// Layer 1: Listen for internal HLS multi-audio tracks
+hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
+  if (data.audioTracks && data.audioTracks.length > 1) {
+    // Populate dropdown with internal tracks: English, Hindi, etc.
+    populateInternalAudioTracks(data.audioTracks);
+  }
+});
+
+// Layer 2: Fallback to Multi-Source Language Switching
+function handleSources(sources) {
+  const languageSources = sources.filter(s => s.language || s.label.includes('—'));
+  if (languageSources.length > 1) {
+    // Populate dropdown with server language streams
+    populateStreamLanguageSelector(languageSources);
+  }
+}
+```
+
+---
+
+## 9. Multi-Language Implementation Reference
 
 ### A. Node.js Native
 ```javascript
@@ -446,7 +526,7 @@ curl -X POST "https://api.bingr.one/api/stream" \
 
 ---
 
-## 9. Agentic Guidelines & Maintenance Rules
+## 10. Agentic Guidelines & Maintenance Rules
 
 When configuring, enhancing, or wrapping this scraper in subagents or automation:
 
@@ -454,3 +534,5 @@ When configuring, enhancing, or wrapping this scraper in subagents or automation
 2. **Handle Expiration Tokens**: Scraped M3U8 links contain `expire=<timestamp>`. Cached URLs should be renewed if older than 2–4 hours.
 3. **Preserve MPEG-TS MIME Types**: When serving or proxying `.m3u8` playlists, set `Content-Type: application/vnd.apple.mpegurl`.
 4. **Never Proxy Video Chunks**: Stream segments directly to client browsers to save server compute and bandwidth since origin CDNs provide `Access-Control-Allow-Origin: *`.
+5. **Multi-Audio Handling**: When multi-audio is required, prioritize server `s70` (Polaris) or expose stream language switching in UI clients.
+
