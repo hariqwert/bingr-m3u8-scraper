@@ -478,19 +478,275 @@ function handleSources(sources) {
 
 ---
 
-## 9. Multi-Language Implementation Reference
+---
+
+## 9. Subtitle Catching & Extraction Architecture
+
+Bingr handles subtitles through a dedicated reverse-proxy caching network (`cache.vdrk.site` and `/api/subtitles/vdrk`). 
+
+### Endpoint Anatomy
+
+```http
+GET https://api.bingr.one/api/subtitles/vdrk/{type}/{tmdbId}?season={season}&ep={episode} HTTP/1.1
+Host: api.bingr.one
+Origin: https://bingr.one
+Referer: https://bingr.one/watch/{type}/{tmdbId}
+```
+
+- **Path Parameters**:
+  - `type`: `movie` or `tv`
+  - `tmdbId`: Standard TMDB numeric identifier (e.g. `1108427`, `1396`)
+- **Query Parameters (TV series only)**:
+  - `season`: Season number (e.g. `1`)
+  - `ep`: Episode number (e.g. `1`)
+
+### Subtitle Response Schema
+
+```json
+{
+  "subtitles": [
+    {
+      "id": "vdrk-1396-16",
+      "url": "https://cache.vdrk.site/v1/vtt/tv/1396/1/1/English.vtt",
+      "lang": "en",
+      "label": "English",
+      "source": "vdrk"
+    },
+    {
+      "id": "vdrk-1396-17",
+      "url": "https://cache.vdrk.site/v1/vtt/tv/1396/1/1/Spanish.vtt",
+      "lang": "es",
+      "label": "Spanish",
+      "source": "vdrk"
+    },
+    {
+      "id": "vdrk-1396-18",
+      "url": "https://cache.vdrk.site/v1/vtt/tv/1396/1/1/French.vtt",
+      "lang": "fr",
+      "label": "French",
+      "source": "vdrk"
+    }
+  ]
+}
+```
+
+### Key Technical Properties of Subtitles
+
+1. **Pure WebVTT (`.vtt`) Standards**: All subtitle tracks are delivered in UTF-8 formatted `text/vtt`.
+2. **Open CORS (`Access-Control-Allow-Origin: *`)**: The edge CDN (`cache.vdrk.site`) sends permissive CORS headers. Web browsers can fetch and render these tracks directly from client-side JavaScript without proxying.
+3. **Massive Multilingual Catalog**:
+   - Movies typically provide English and primary regional dubs.
+   - Popular TV shows provide **85+ language tracks** (Arabic, Bulgarian, Czech, Dutch, French, German, Hebrew, Italian, Korean, Polish, Spanish, Turkish, etc.).
+4. **Auto-Catching & Merging**: In our updated `scraper.js`, if a stream extraction returns 0 or 1 subtitle, the scraper automatically queries the VDRK subtitle cluster and merges the complete multi-language track list.
+
+---
+
+## 10. Migration & Upgrade Guide (For Existing Integrations)
+
+If you previously integrated an older version of our scraper that only extracted a single M3U8 stream without subtitle and dub audio support, follow this guide to upgrade your project in minutes.
+
+### What Changed? (Before vs After)
+
+| Feature | Old Integration | Upgraded Integration |
+| :--- | :--- | :--- |
+| **Subtitle Catching** | Empty array `subtitles: []` | Populated array with 1–90+ WebVTT subtitle URLs |
+| **Audio Dubs** | Single pre-muxed audio only | Dual-Layer: HLS tracks + multi-stream language selector |
+| **Video Player** | Basic HLS play without `<track>` | Full closed-captions toggle & language switcher |
+| **CORS Compatibility** | Native video only | `crossorigin="anonymous"` for remote `.vtt` tracks |
+
+---
+
+### Step 1: Upgrading Your Scraper Backend
+
+#### If using `scraper.js` directly:
+Replace your local `scraper.js` with the updated version. The `scrapeMovie` and `scrapeTvEpisode` functions now automatically include the `subtitles` array:
+
+```javascript
+// BEFORE (old payload)
+const result = await scraper.scrapeMovie(1108427);
+console.log(result.primaryM3u8); // Only had video URL
+
+// AFTER (upgraded payload)
+const result = await scraper.scrapeMovie(1108427);
+console.log(result.primaryM3u8); // Stream M3U8 URL
+console.log(result.subtitles);   // Array of { id, url, lang, label }
+console.log(result.sources);     // Multi-language stream options (English, Hindi, etc.)
+```
+
+#### If using custom HTTP requests (Python, PHP, Go):
+Add a parallel call to fetch subtitles:
+```http
+GET https://api.bingr.one/api/subtitles/vdrk/{type}/{id}?season={season}&ep={episode}
+Referer: https://bingr.one/watch/{type}/{id}
+Origin: https://bingr.one
+```
+
+---
+
+### Step 2: Upgrading Your Web Player (Frontend)
+
+To render the captured subtitles and switch dub languages in your player:
+
+#### A. Add `crossorigin="anonymous"` to your `<video>` tag
+> ⚠️ **CRITICAL**: Without `crossorigin="anonymous"`, web browsers block remote WebVTT subtitle tracks due to CORS security rules.
+
+```html
+<!-- BEFORE -->
+<video id="myPlayer" controls></video>
+
+<!-- AFTER -->
+<video id="myPlayer" controls playsinline crossorigin="anonymous"></video>
+```
+
+#### B. Add Subtitle & Audio Selectors to your HTML toolbar
+```html
+<!-- Subtitle Selector Dropdown -->
+<select id="subtitleSelect" onchange="switchSubtitle(this.value)">
+  <option value="off">Subtitles: Off</option>
+</select>
+
+<!-- Audio Language Selector Dropdown -->
+<select id="audioSelect" onchange="switchAudio(this.value)">
+  <option value="-1">Audio: Default</option>
+</select>
+```
+
+#### C. Drop-in Player Upgrade Script (JavaScript)
+
+Replace your existing video playback function with this universal implementation:
+
+```javascript
+let hls = null;
+let currentSources = [];
+let currentSubtitles = [];
+
+function loadStreamWithAudioAndSubtitles(sources, subtitles) {
+  const video = document.getElementById('myPlayer');
+  currentSources = sources;
+  currentSubtitles = subtitles || [];
+
+  // 1. INJECT SUBTITLES AS <track> ELEMENTS
+  // Remove existing tracks
+  video.querySelectorAll('track').forEach(t => t.remove());
+
+  const subSelect = document.getElementById('subtitleSelect');
+  subSelect.innerHTML = '<option value="off">Subtitles: Off</option>';
+
+  if (currentSubtitles.length > 0) {
+    subSelect.style.display = 'inline-block';
+    currentSubtitles.forEach((sub, idx) => {
+      // Create HTML5 track
+      const track = document.createElement('track');
+      track.kind = 'subtitles';
+      track.label = sub.label || sub.lang;
+      track.srclang = sub.lang || 'en';
+      track.src = sub.url;
+      video.appendChild(track);
+
+      // Add to UI dropdown
+      const opt = document.createElement('option');
+      opt.value = idx;
+      opt.innerText = `CC: ${sub.label || sub.lang}`;
+      subSelect.appendChild(opt);
+    });
+  } else {
+    subSelect.style.display = 'none';
+  }
+
+  // 2. POPULATE DUB LANGUAGE SELECTOR
+  const audioSelect = document.getElementById('audioSelect');
+  audioSelect.innerHTML = '<option value="-1">Audio: Default</option>';
+
+  // Check if scraper returned multi-language stream alternatives (e.g. Polaris)
+  const languageStreams = sources.filter(s => s.language || s.label?.includes('—'));
+  if (languageStreams.length > 1) {
+    audioSelect.style.display = 'inline-block';
+    languageStreams.forEach((src, idx) => {
+      const opt = document.createElement('option');
+      opt.value = `src_${idx}`;
+      opt.innerText = `Audio: ${src.label || src.language}`;
+      audioSelect.appendChild(opt);
+    });
+  }
+
+  // 3. INITIALIZE HLS.JS
+  const primaryUrl = sources[0].url;
+  if (hls) hls.destroy();
+
+  if (Hls.isSupported()) {
+    hls = new Hls();
+    hls.loadSource(primaryUrl);
+    hls.attachMedia(video);
+
+    // Layer 1: Listen for in-manifest HLS audio tracks (HLS v7 master playlists)
+    hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
+      if (data.audioTracks && data.audioTracks.length > 1) {
+        audioSelect.style.display = 'inline-block';
+        audioSelect.innerHTML = '';
+        data.audioTracks.forEach((track, idx) => {
+          const opt = document.createElement('option');
+          opt.value = `hls_${idx}`;
+          opt.innerText = `Audio: ${track.name || track.lang || `Track ${idx + 1}`}`;
+          audioSelect.appendChild(opt);
+        });
+      }
+    });
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = primaryUrl;
+  }
+}
+
+// 4. SUBTITLE SWITCHING FUNCTION
+function switchSubtitle(trackIdx) {
+  const video = document.getElementById('myPlayer');
+  for (let i = 0; i < video.textTracks.length; i++) {
+    if (trackIdx === 'off') {
+      video.textTracks[i].mode = 'disabled';
+    } else {
+      video.textTracks[i].mode = (i === parseInt(trackIdx)) ? 'showing' : 'disabled';
+    }
+  }
+}
+
+// 5. AUDIO LANGUAGE SWITCHING FUNCTION
+function switchAudio(val) {
+  if (val.startsWith('hls_')) {
+    // In-stream HLS track switch (instant, no re-buffering)
+    const idx = parseInt(val.replace('hls_', ''));
+    if (hls) hls.audioTrack = idx;
+  } else if (val.startsWith('src_')) {
+    // Multi-source stream switch (loads alternate language M3U8)
+    const idx = parseInt(val.replace('src_', ''));
+    const chosen = currentSources[idx];
+    if (chosen && hls) {
+      hls.loadSource(chosen.url);
+      hls.attachMedia(document.getElementById('myPlayer'));
+    }
+  }
+}
+```
+
+---
+
+## 11. Multi-Language Implementation Reference
 
 ### A. Node.js Native
 ```javascript
 const scraper = require('./scraper');
 
-// Scrape Movie
+// Scrape Movie with Subtitles & Sources
 const movie = await scraper.scrapeMovie(1108427);
 console.log('M3U8:', movie.primaryM3u8);
+console.log('Subtitles Count:', movie.subtitles.length);
 
-// Scrape TV Series Episode
+// Scrape TV Series Episode with Subtitles
 const episode = await scraper.scrapeTvEpisode(1396, 1, 1);
 console.log('Episode M3U8:', episode.primaryM3u8);
+console.log('Episode Subtitles:', episode.subtitles.length);
+
+// Direct Subtitles Catching
+const subs = await scraper.getSubtitles('tv', 1396, 1, 1);
+console.log('Found Languages:', subs.map(s => s.label));
 ```
 
 ### B. Python 3 (`requests`)
@@ -503,30 +759,39 @@ HEADERS = {
     'Origin': 'https://bingr.one'
 }
 
-payload = {
-    "srv": "s62",
-    "t": "movie",
-    "id": 1108427,
-    "query": {"title": "Kill", "year": "2024"}
-}
+# 1. Scrape Stream
+stream_res = requests.post(
+    "https://api.bingr.one/api/stream",
+    json={"srv": "s62", "t": "movie", "id": 1108427, "query": {"title": "Kill", "year": "2024"}},
+    headers=HEADERS
+)
+stream_data = stream_res.json()
+print("M3U8 URL:", stream_data["sources"][0]["url"])
 
-res = requests.post("https://api.bingr.one/api/stream", json=payload, headers=HEADERS)
-data = res.json()
-print("M3U8 URL:", data["sources"][0]["url"])
+# 2. Catch Subtitles
+sub_res = requests.get("https://api.bingr.one/api/subtitles/vdrk/movie/1108427", headers=HEADERS)
+sub_data = sub_res.json()
+print("Found Subtitles:", len(sub_data.get("subtitles", [])))
 ```
 
 ### C. Raw cURL
 ```bash
+# Scrape Stream
 curl -X POST "https://api.bingr.one/api/stream" \
   -H "Origin: https://bingr.one" \
   -H "Referer: https://bingr.one/watch/movie/1108427" \
   -H "Content-Type: application/json" \
   -d '{"srv":"s62","t":"movie","id":1108427,"query":{"title":"Kill","year":"2024"}}'
+
+# Catch Subtitles
+curl -X GET "https://api.bingr.one/api/subtitles/vdrk/movie/1108427" \
+  -H "Origin: https://bingr.one" \
+  -H "Referer: https://bingr.one/watch/movie/1108427"
 ```
 
 ---
 
-## 10. Agentic Guidelines & Maintenance Rules
+## 12. Agentic Guidelines & Maintenance Rules
 
 When configuring, enhancing, or wrapping this scraper in subagents or automation:
 
@@ -534,5 +799,7 @@ When configuring, enhancing, or wrapping this scraper in subagents or automation
 2. **Handle Expiration Tokens**: Scraped M3U8 links contain `expire=<timestamp>`. Cached URLs should be renewed if older than 2–4 hours.
 3. **Preserve MPEG-TS MIME Types**: When serving or proxying `.m3u8` playlists, set `Content-Type: application/vnd.apple.mpegurl`.
 4. **Never Proxy Video Chunks**: Stream segments directly to client browsers to save server compute and bandwidth since origin CDNs provide `Access-Control-Allow-Origin: *`.
-5. **Multi-Audio Handling**: When multi-audio is required, prioritize server `s70` (Polaris) or expose stream language switching in UI clients.
+5. **Always Set `crossorigin="anonymous"` for Subtitles**: Web browsers require this tag on `<video>` elements to render third-party WebVTT captions without CORS failures.
+6. **Multi-Audio Handling**: Use the dual-layer approach: check `hls.audioTracks` first; if empty, expose stream switching across `sources` with distinct language labels.
+
 

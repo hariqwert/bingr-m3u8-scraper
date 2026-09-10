@@ -12,6 +12,7 @@ Usage:
   node cli.js search <query>                     Search for movies & TV series by title or TMDB ID
   node cli.js movie <tmdbId> [serverId]          Scrape live M3U8 stream for a movie
   node cli.js tv <tmdbId> <season> <episode>     Scrape live M3U8 stream for a specific TV episode
+  node cli.js subtitles <type> <id> [s] [ep]     Catch multi-language WebVTT subtitles
   node cli.js episodes <tmdbId> <season>         List all episodes in a TV season
   node cli.js sports                             List today's live and upcoming sports matches
   node cli.js sport-stream <source> <matchId>    Scrape live M3U8 for a sports match
@@ -21,6 +22,8 @@ Examples:
   node cli.js search "Kill"
   node cli.js movie 1108427
   node cli.js tv 1396 1 1
+  node cli.js subtitles movie 1108427
+  node cli.js subtitles tv 1396 1 1
   node cli.js sports
   node cli.js sport-stream solaris 247-fox-footy
 `);
@@ -81,10 +84,45 @@ async function run() {
         result.sources.forEach((src, idx) => {
           console.log(`  [#${idx + 1}] ${src.quality || 'Auto'} - ${src.url}`);
         });
+        if (result.subtitles && result.subtitles.length > 0) {
+          console.log(`\nCaptured Subtitles (${result.subtitles.length} tracks):`);
+          result.subtitles.slice(0, 6).forEach(s => {
+            console.log(`  • [${s.lang || 'cc'}] ${s.label || s.lang} -> ${s.url}`);
+          });
+          if (result.subtitles.length > 6) {
+            console.log(`  ... and ${result.subtitles.length - 6} more languages`);
+          }
+        }
       } else {
         console.error('\n❌ Scraper failed to extract stream.');
         console.error(result.error);
       }
+      return;
+    }
+
+    if (command === 'subtitles') {
+      const type = args[1] || 'movie';
+      const tmdbId = args[2];
+      const season = args[3] || 1;
+      const episode = args[4] || 1;
+
+      if (!tmdbId) {
+        console.error('Error: Please specify media type and TMDB ID. Example: node cli.js subtitles movie 1108427');
+        return;
+      }
+
+      console.log(`💬 Fetching subtitles for [${type.toUpperCase()}] TMDB: ${tmdbId}${type === 'tv' ? ` S${season}E${episode}` : ''}...`);
+      const subs = await scraper.getSubtitles(type, tmdbId, season, episode);
+
+      if (subs.length > 0) {
+        console.log(`\n✅ Captured ${subs.length} Subtitle Track(s):\n`);
+        subs.forEach(s => {
+          console.log(`• [${s.lang || 'cc'}] ${s.label || s.lang} -> ${s.url}`);
+        });
+      } else {
+        console.log('\nNo subtitle tracks found for this title.');
+      }
+      console.log('');
       return;
     }
 
@@ -130,6 +168,15 @@ async function run() {
         result.sources.forEach((src, idx) => {
           console.log(`  [#${idx + 1}] ${src.quality || 'Auto'} - ${src.url}`);
         });
+        if (result.subtitles && result.subtitles.length > 0) {
+          console.log(`\nCaptured Subtitles (${result.subtitles.length} tracks):`);
+          result.subtitles.slice(0, 6).forEach(s => {
+            console.log(`  • [${s.lang || 'cc'}] ${s.label || s.lang} -> ${s.url}`);
+          });
+          if (result.subtitles.length > 6) {
+            console.log(`  ... and ${result.subtitles.length - 6} more languages`);
+          }
+        }
       } else {
         console.error('\n❌ Scraper failed to extract stream.');
         console.error(result.error);

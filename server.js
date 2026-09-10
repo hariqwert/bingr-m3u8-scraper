@@ -55,12 +55,24 @@ const server = http.createServer(async (req, res) => {
           'GET  /tv/:tmdbId',
           'GET  /tv/:tmdbId/season/:seasonNumber',
           'GET  /tv/:tmdbId/season/:seasonNumber/episode/:episodeNumber/stream?srv={optional_server}',
+          'GET  /subtitles/:type/:tmdbId?season=1&ep=1',
           'GET  /sports/matches',
           'GET  /sports/stream/:source/:matchId',
           'GET  /servers',
           'POST /scrape'
         ]
       });
+    }
+
+    // 1a. Subtitles API: /subtitles/:type/:id
+    const subMatch = pathname.match(/^\/subtitles\/([a-zA-Z0-9_-]+)\/(\d+)$/);
+    if (subMatch) {
+      const type = subMatch[1];
+      const tmdbId = subMatch[2];
+      const season = parsedUrl.query.season || 1;
+      const episode = parsedUrl.query.ep || parsedUrl.query.episode || 1;
+      const subs = await scraper.getSubtitles(type, tmdbId, season, episode);
+      return sendJson(res, 200, { tmdbId: Number(tmdbId), type, subtitles: subs });
     }
 
     // 1b. Sports Matches List

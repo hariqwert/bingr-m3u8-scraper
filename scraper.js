@@ -120,6 +120,31 @@ async function getTvEpisodes(tmdbId, seasonNumber) {
 }
 
 /**
+ * Catch Subtitles for Movie or TV Episode
+ * @param {string} type - 'movie' or 'tv'
+ * @param {number|string} tmdbId - TMDB ID
+ * @param {number|string} [season] - TV season number (defaults to 1)
+ * @param {number|string} [episode] - TV episode number (defaults to 1)
+ */
+async function getSubtitles(type, tmdbId, season, episode) {
+  let endpoint = `/subtitles/vdrk/${type}/${tmdbId}`;
+  if (type === 'tv') {
+    endpoint += `?season=${season || 1}&ep=${episode || 1}`;
+  }
+  try {
+    const res = await request(endpoint, {
+      referer: type === 'tv'
+        ? `https://bingr.one/watch/tv/${tmdbId}/${season || 1}/${episode || 1}`
+        : `https://bingr.one/watch/movie/${tmdbId}`
+    });
+    if (res.status === 200 && Array.isArray(res.data?.subtitles)) {
+      return res.data.subtitles;
+    }
+  } catch (err) {}
+  return [];
+}
+
+/**
  * Universal Stream Scraper with Server Cascade
  * @param {Object} params
  * @param {string} params.type - 'movie' or 'tv'
@@ -184,6 +209,20 @@ async function scrapeStream({ type = 'movie', id, title, year, season, episode, 
       const latencyMs = Date.now() - startTime;
 
       if (res.status === 200 && res.data?.sources?.length > 0) {
+        let subtitles = res.data.subtitles || [];
+        try {
+          const externalSubs = await getSubtitles(type, id, season, episode);
+          if (Array.isArray(externalSubs) && externalSubs.length > 0) {
+            const seenUrls = new Set(subtitles.map(s => s.url));
+            for (const sub of externalSubs) {
+              if (!seenUrls.has(sub.url)) {
+                subtitles.push(sub);
+                seenUrls.add(sub.url);
+              }
+            }
+          }
+        } catch (e) {}
+
         successResult = {
           success: true,
           type,
@@ -197,7 +236,7 @@ async function scrapeStream({ type = 'movie', id, title, year, season, episode, 
           primaryM3u8: res.data.sources[0].url,
           quality: res.data.sources[0].quality || 'Auto',
           sources: res.data.sources,
-          subtitles: res.data.subtitles || []
+          subtitles
         };
 
         attempts.push({
@@ -320,6 +359,7 @@ module.exports = {
   getMovieDetails,
   getTvDetails,
   getTvEpisodes,
+  getSubtitles,
   scrapeStream,
   scrapeMovie,
   scrapeTvEpisode,
