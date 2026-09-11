@@ -13,6 +13,7 @@ Usage:
   node cli.js movie <tmdbId> [serverId]          Scrape live M3U8 stream for a movie
   node cli.js tv <tmdbId> <season> <episode>     Scrape live M3U8 stream for a specific TV episode
   node cli.js subtitles <type> <id> [s] [ep]     Catch multi-language WebVTT subtitles
+  node cli.js skip <id> [episode]                Get Opening/Ending skip timestamps
   node cli.js episodes <tmdbId> <season>         List all episodes in a TV season
   node cli.js sports                             List today's live and upcoming sports matches
   node cli.js sport-stream <source> <matchId>    Scrape live M3U8 for a sports match
@@ -121,6 +122,26 @@ async function run() {
         });
       } else {
         console.log('\nNo subtitle tracks found for this title.');
+      }
+      console.log('');
+      return;
+    }
+
+    if (command === 'skip') {
+      const id = args[1];
+      const ep = args[2] || 1;
+      if (!id) {
+        console.error('Error: Please specify ID and Episode. Example: node cli.js skip 1735 1');
+        return;
+      }
+      console.log(`⏱️  Fetching Skip Timestamps for ID ${id} Episode ${ep}...`);
+      const skipData = await scraper.getSkipTimes(id, ep);
+      if (skipData.found) {
+        console.log('\n✅ Skip Timestamps Found:');
+        if (skipData.op) console.log(`  • Opening (Intro): ${skipData.op.start}s - ${skipData.op.end}s (Skip: +${skipData.op.end - skipData.op.start}s)`);
+        if (skipData.ed) console.log(`  • Ending (Outro): ${skipData.ed.start}s - ${skipData.ed.end}s`);
+      } else {
+        console.log('\nℹ️  No database timestamps found. Standard TV Intro window: 15s - 95s (+80s skip).');
       }
       console.log('');
       return;

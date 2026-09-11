@@ -6,9 +6,10 @@ const BINGR_API = 'https://api.bingr.one/api';
  * Active Bingr Scraper Clusters
  */
 const SERVERS = [
-  { id: 's62', name: 'Bastion (KNOCW / NXOCW / FLOCW CDN)', cc: 'IN' },
+  { id: 's4k', name: 'PeakStorm 4K (SpeedRace 4K UHD & 1080p)', cc: 'GL' },
+  { id: 's70', name: 'Polaris (Multi-Language Dubs / HLS v7)', cc: 'US' },
   { id: 's40', name: 'DarkMatter (StreamRip 1080p)', cc: 'GL' },
-  { id: 's70', name: 'Polaris (Multi-CDN Worker Cluster)', cc: 'US' },
+  { id: 's62', name: 'Bastion (KNOCW / NXOCW / FLOCW CDN)', cc: 'IN' },
   { id: 's3',  name: 'Edmunds (Filmu Proxy)', cc: 'US' },
   { id: 's60', name: 'Vertex', cc: 'US' },
   { id: 's61', name: 'Corvus', cc: 'US' },
@@ -120,13 +121,32 @@ async function getTvEpisodes(tmdbId, seasonNumber) {
 }
 
 /**
- * Catch Subtitles for Movie or TV Episode
+ * Catch Subtitles for Movie or TV Episode (Direct VDRK with Bingr Proxy Fallback)
  * @param {string} type - 'movie' or 'tv'
  * @param {number|string} tmdbId - TMDB ID
  * @param {number|string} [season] - TV season number (defaults to 1)
  * @param {number|string} [episode] - TV episode number (defaults to 1)
  */
 async function getSubtitles(type, tmdbId, season, episode) {
+  // 1. Primary: Direct query to sub.vdrk.site (Open CORS, 80+ languages)
+  try {
+    let directUrl = `https://sub.vdrk.site/v1/${type}/${tmdbId}`;
+    if (type === 'tv') {
+      directUrl += `/${season || 1}/${episode || 1}`;
+    }
+    const directRes = await request(directUrl, { referer: 'https://bingr.one/' });
+    if (directRes.status === 200 && Array.isArray(directRes.data) && directRes.data.length > 0) {
+      return directRes.data.map((s, idx) => ({
+        id: `vdrk-direct-${tmdbId}-${idx}`,
+        url: s.file || s.url,
+        lang: s.lang || (s.label ? s.label.slice(0, 2).toLowerCase() : 'en'),
+        label: s.label || s.lang || 'English',
+        source: 'vdrk-direct'
+      }));
+    }
+  } catch (e) {}
+
+  // 2. Secondary: Fallback to Bingr API subtitle proxy
   let endpoint = `/subtitles/vdrk/${type}/${tmdbId}`;
   if (type === 'tv') {
     endpoint += `?season=${season || 1}&ep=${episode || 1}`;
@@ -145,6 +165,75 @@ async function getSubtitles(type, tmdbId, season, episode) {
 }
 
 /**
+ * Scrape Direct 4K & 1080p M3U8 from SpeedRace / PeakStorm CDN Engine
+ * @param {Object} params
+ */
+async function scrapeSpeedrace({ type = 'movie', id, title = '', year = '', season, episode }) {
+  if (!id) throw new Error('TMDB ID is required');
+
+  // 1. Fetch seed token
+  const seedRes = await request(`https://api.speedracelight.com/seed?mediaId=${id}`, {
+    referer: 'https://www.vidking.net/'
+  });
+  const seed = seedRes.data?.seed;
+  if (!seed) throw new Error('Failed to retrieve seed token from SpeedRace');
+
+  // 2. Query gateway (CDN sources)
+  const encTitle = encodeURIComponent(encodeURIComponent(title || ''));
+  let url = `https://api.speedracelight.com/cdn/sources-with-title?title=${encTitle}&mediaType=${type}&year=${year || ''}&tmdbId=${id}&imdbId=tt${String(id).padStart(7, '0')}&enc=2&seed=${seed}`;
+  if (type === 'tv' && season && episode) {
+    url += `&season=${season}&episode=${episode}`;
+  }
+
+  const encRes = await request(url, { referer: 'https://www.vidking.net/' });
+  const encText = encRes.data;
+  if (!encText || typeof encText !== 'string') {
+    throw new Error('Empty encrypted response from SpeedRace');
+  }
+
+  // 3. Decrypt via enc-dec.app gateway
+  const decRes = await request('https://enc-dec.app/api/dec-videasy', {
+    method: 'POST',
+    body: { text: encText, id: String(id), seed },
+    referer: 'https://www.vidking.net/'
+  });
+
+  const resData = decRes.data?.result;
+  if (!resData) throw new Error('Failed to decrypt SpeedRace payload');
+
+  const sources = [];
+  if (resData.playlist) {
+    sources.push({
+      url: resData.playlist,
+      quality: '4K / Auto',
+      type: 'application/x-mpegurl',
+      label: 'PeakStorm #0 (Master 4K UHD)',
+      name: 'Master 4K'
+    });
+  }
+
+  if (Array.isArray(resData.sources)) {
+    for (let i = 0; i < resData.sources.length; i++) {
+      const s = resData.sources[i];
+      sources.push({
+        url: s.url,
+        quality: s.quality || 'Auto',
+        type: 'application/x-mpegurl',
+        label: `PeakStorm #${i + 1} (${s.quality})`,
+        name: s.quality
+      });
+    }
+  }
+
+  return {
+    scraperName: 'PeakStorm 4K',
+    playlist: resData.playlist,
+    sources,
+    subtitles: Array.isArray(resData.subtitles) ? resData.subtitles : []
+  };
+}
+
+/**
  * Universal Stream Scraper with Server Cascade
  * @param {Object} params
  * @param {string} params.type - 'movie' or 'tv'
@@ -153,7 +242,7 @@ async function getSubtitles(type, tmdbId, season, episode) {
  * @param {string|number} [params.year] - Release Year
  * @param {number} [params.season] - TV Season number
  * @param {number} [params.episode] - TV Episode number
- * @param {string} [params.srv] - Specific server ID (e.g. 's62', 's40') or omit for auto-cascade
+ * @param {string} [params.srv] - Specific server ID (e.g. 's4k', 's62', 's40') or omit for auto-cascade
  */
 async function scrapeStream({ type = 'movie', id, title, year, season, episode, srv }) {
   if (!id) throw new Error('TMDB ID is required');
@@ -189,27 +278,53 @@ async function scrapeStream({ type = 'movie', id, title, year, season, episode, 
     const startTime = Date.now();
 
     try {
-      const payload = {
-        srv: serverId,
-        t: type,
-        id: Number(id),
-        query
-      };
+      let sources = [];
+      let scraperName = serverMeta.name;
+      let rawSubtitles = [];
 
-      const referer = type === 'tv'
-        ? `https://bingr.one/watch/tv/${id}/${season || 1}/${episode || 1}`
-        : `https://bingr.one/watch/movie/${id}`;
+      if (serverId === 's4k') {
+        // Direct scrape from PeakStorm / SpeedRace 4K engine
+        const speedRes = await scrapeSpeedrace({
+          type,
+          id: Number(id),
+          title: mediaTitle,
+          year: mediaYear,
+          season,
+          episode
+        });
+        sources = speedRes.sources || [];
+        scraperName = speedRes.scraperName || serverMeta.name;
+        rawSubtitles = speedRes.subtitles || [];
+      } else {
+        // Bingr scraper cluster
+        const payload = {
+          srv: serverId,
+          t: type,
+          id: Number(id),
+          query
+        };
 
-      const res = await request('/stream', {
-        method: 'POST',
-        body: payload,
-        referer
-      });
+        const referer = type === 'tv'
+          ? `https://bingr.one/watch/tv/${id}/${season || 1}/${episode || 1}`
+          : `https://bingr.one/watch/movie/${id}`;
+
+        const res = await request('/stream', {
+          method: 'POST',
+          body: payload,
+          referer
+        });
+
+        if (res.status === 200 && res.data?.sources?.length > 0) {
+          sources = res.data.sources;
+          scraperName = res.data.scraperName || serverMeta.name;
+          rawSubtitles = res.data.subtitles || [];
+        }
+      }
 
       const latencyMs = Date.now() - startTime;
 
-      if (res.status === 200 && res.data?.sources?.length > 0) {
-        let subtitles = res.data.subtitles || [];
+      if (sources.length > 0) {
+        let subtitles = rawSubtitles;
         try {
           const externalSubs = await getSubtitles(type, id, season, episode);
           if (Array.isArray(externalSubs) && externalSubs.length > 0) {
@@ -232,10 +347,10 @@ async function scrapeStream({ type = 'movie', id, title, year, season, episode, 
           ...(type === 'tv' ? { season: Number(season), episode: Number(episode) } : {}),
           serverId,
           serverName: serverMeta.name,
-          scraperName: res.data.scraperName || serverMeta.name,
-          primaryM3u8: res.data.sources[0].url,
-          quality: res.data.sources[0].quality || 'Auto',
-          sources: res.data.sources,
+          scraperName,
+          primaryM3u8: sources[0].url,
+          quality: sources[0].quality || 'Auto',
+          sources,
           subtitles
         };
 
@@ -244,7 +359,7 @@ async function scrapeStream({ type = 'movie', id, title, year, season, episode, 
           serverName: serverMeta.name,
           status: 'success',
           latencyMs,
-          sourcesCount: res.data.sources.length
+          sourcesCount: sources.length
         });
         break;
       } else {
@@ -252,8 +367,7 @@ async function scrapeStream({ type = 'movie', id, title, year, season, episode, 
           serverId,
           serverName: serverMeta.name,
           status: 'empty_sources',
-          latencyMs,
-          httpStatus: res.status
+          latencyMs
         });
       }
     } catch (err) {
@@ -353,6 +467,36 @@ async function getMatchStream(source, matchId) {
   };
 }
 
+/**
+ * Retrieve Opening / Ending Skip Timestamps (AniSkip API with Standard TV Heuristics)
+ * @param {number|string} malIdOrTmdbId - MyAnimeList or TMDB identifier
+ * @param {number} [episode=1] - Episode number
+ */
+async function getSkipTimes(malIdOrTmdbId, episode = 1) {
+  if (!malIdOrTmdbId) {
+    return { found: false, op: { start: 15, end: 95 }, ed: null };
+  }
+  try {
+    const url = `https://api.aniskip.com/v2/skip-times/${malIdOrTmdbId}/${episode}?types[]=op&types[]=ed&episodeLength=0`;
+    const res = await request(url);
+    if (res.status === 200 && res.data?.found && Array.isArray(res.data?.results)) {
+      const op = res.data.results.find(r => r.skipType === 'op');
+      const ed = res.data.results.find(r => r.skipType === 'ed');
+      return {
+        found: true,
+        op: op ? { start: Math.round(op.interval.startTime), end: Math.round(op.interval.endTime) } : { start: 15, end: 95 },
+        ed: ed ? { start: Math.round(ed.interval.startTime), end: Math.round(ed.interval.endTime) } : null,
+        results: res.data.results
+      };
+    }
+  } catch (e) {}
+  return {
+    found: false,
+    op: { start: 15, end: 95 }, // Standard 80s TV intro heuristic fallback
+    ed: null
+  };
+}
+
 module.exports = {
   SERVERS,
   search,
@@ -360,6 +504,8 @@ module.exports = {
   getTvDetails,
   getTvEpisodes,
   getSubtitles,
+  getSkipTimes,
+  scrapeSpeedrace,
   scrapeStream,
   scrapeMovie,
   scrapeTvEpisode,

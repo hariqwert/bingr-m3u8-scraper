@@ -13,13 +13,14 @@ $tmdbId  = isset($_GET['tmdb']) ? preg_replace('/[^0-9]/', '', $_GET['tmdb']) : 
 $type    = isset($_GET['type']) && $_GET['type'] === 'tv' ? 'tv' : 'movie';
 $season  = isset($_GET['season']) ? (int)$_GET['season'] : 1;
 $episode = isset($_GET['ep']) ? (int)$_GET['ep'] : (isset($_GET['episode']) ? (int)$_GET['episode'] : 1);
-$currentSrv = isset($_GET['srv']) ? preg_replace('/[^a-zA-Z0-9_-]/', '', $_GET['srv']) : 's62';
+$currentSrv = isset($_GET['srv']) ? preg_replace('/[^a-zA-Z0-9_-]/', '', $_GET['srv']) : 's4k';
 
 // Active Server Clusters
 $servers = [
-    's62' => 'Bastion (Default - KNOCW/NXOCW)',
+    's4k' => 'PeakStorm 4K (SpeedRace 4K UHD & 1080p Direct)',
     's70' => 'Polaris (Multi-Language Dubs / HLS v7)',
-    's40' => 'DarkMatter (StreamRip 1080p)',
+    's40' => 'DarkMatter (StreamRip 1080p Direct)',
+    's62' => 'Bastion (KNOCW/NXOCW CDN)',
     's3'  => 'Edmunds (Filmu Proxy)',
     's60' => 'Vertex (Alternate)',
     's61' => 'Corvus',
@@ -60,47 +61,187 @@ function queryBingr($endpoint, $postData = null) {
     return ($status === 200 && $res) ? json_decode($res, true) : null;
 }
 
-// 1. Scrape stream from selected server
-$streamPayload = [
-    'srv' => $currentSrv,
-    't'   => $type,
-    'id'  => (int)$tmdbId,
-    'query' => [
-        'title' => '',
-        'year'  => ''
-    ]
-];
-if ($type === 'tv') {
-    $streamPayload['query']['season'] = $season;
-    $streamPayload['query']['episode'] = $episode;
+/**
+ * Scrape Direct 4K/1080p M3U8 from SpeedRace / PeakStorm CDN Engine
+ */
+function scrapeSpeedracePHP($type, $id, $title = '', $year = '', $season = 1, $episode = 1) {
+    // 1. Fetch seed token
+    $ch = curl_init("https://api.speedracelight.com/seed?mediaId=" . urlencode($id));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer: https://www.vidking.net/',
+        'Origin: https://www.vidking.net'
+    ]);
+    $seedRaw = curl_exec($ch);
+    curl_close($ch);
+    $seedJson = json_decode($seedRaw, true);
+    $seed = $seedJson['seed'] ?? null;
+    if (!$seed) return null;
+
+    // 2. Query CDN sources
+    $encTitle = rawurlencode(rawurlencode($title));
+    $url = "https://api.speedracelight.com/cdn/sources-with-title?title={$encTitle}&mediaType={$type}&year={$year}&tmdbId={$id}&imdbId=tt" . str_pad($id, 7, '0', STR_PAD_LEFT) . "&enc=2&seed={$seed}";
+    if ($type === 'tv') {
+        $url .= "&season={$season}&episode={$episode}";
+    }
+
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer: https://www.vidking.net/',
+        'Origin: https://www.vidking.net'
+    ]);
+    $encText = curl_exec($ch);
+    curl_close($ch);
+    if (!$encText || strpos(trim($encText), '{') === 0) return null;
+
+    // 3. Decrypt via enc-dec.app gateway
+    $decPayload = json_encode([
+        'text' => $encText,
+        'id'   => (string)$id,
+        'seed' => $seed
+    ]);
+    $ch = curl_init('https://enc-dec.app/api/dec-videasy');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $decPayload);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Content-Type: application/json',
+        'Content-Length: ' . strlen($decPayload),
+        'Referer: https://www.vidking.net/',
+        'Origin: https://www.vidking.net'
+    ]);
+    $decRaw = curl_exec($ch);
+    curl_close($ch);
+    $decJson = json_decode($decRaw, true);
+    $resData = $decJson['result'] ?? null;
+    if (!$resData) return null;
+
+    $sources = [];
+    if (!empty($resData['playlist'])) {
+        $sources[] = [
+            'url'     => $resData['playlist'],
+            'quality' => '4K / Auto',
+            'type'    => 'application/x-mpegurl',
+            'label'   => 'PeakStorm #0 (Master 4K UHD)',
+            'name'    => 'Master 4K'
+        ];
+    }
+    if (!empty($resData['sources']) && is_array($resData['sources'])) {
+        foreach ($resData['sources'] as $i => $s) {
+            $sources[] = [
+                'url'     => $s['url'],
+                'quality' => $s['quality'] ?? 'Auto',
+                'type'    => 'application/x-mpegurl',
+                'label'   => 'PeakStorm #' . ($i + 1) . ' (' . ($s['quality'] ?? 'Auto') . ')',
+                'name'    => $s['quality'] ?? 'Auto'
+            ];
+        }
+    }
+
+    return [
+        'scraperName' => 'PeakStorm 4K',
+        'sources'     => $sources,
+        'subtitles'   => $resData['subtitles'] ?? []
+    ];
 }
 
-$streamResult = queryBingr('/stream', $streamPayload);
-$sources = (isset($streamResult['sources']) && is_array($streamResult['sources'])) ? $streamResult['sources'] : [];
+// 1. Scrape stream from selected server
+$sources = [];
+$usedSrv = $currentSrv;
+
+if ($currentSrv === 's4k') {
+    $speedRes = scrapeSpeedracePHP($type, (int)$tmdbId, '', '', $season, $episode);
+    if (!empty($speedRes['sources'])) {
+        $sources = $speedRes['sources'];
+    }
+} else {
+    $streamPayload = [
+        'srv' => $currentSrv,
+        't'   => $type,
+        'id'  => (int)$tmdbId,
+        'query' => [
+            'title' => '',
+            'year'  => ''
+        ]
+    ];
+    if ($type === 'tv') {
+        $streamPayload['query']['season'] = $season;
+        $streamPayload['query']['episode'] = $episode;
+    }
+    $streamResult = queryBingr('/stream', $streamPayload);
+    $sources = (isset($streamResult['sources']) && is_array($streamResult['sources'])) ? $streamResult['sources'] : [];
+}
 
 // If selected server failed, try automatic cascade across available servers
-$usedSrv = $currentSrv;
 if (empty($sources)) {
     foreach (array_keys($servers) as $altSrv) {
         if ($altSrv === $currentSrv) continue;
-        $streamPayload['srv'] = $altSrv;
-        $altRes = queryBingr('/stream', $streamPayload);
-        if (!empty($altRes['sources'])) {
-            $streamResult = $altRes;
-            $sources = $altRes['sources'];
-            $usedSrv = $altSrv;
-            break;
+
+        if ($altSrv === 's4k') {
+            $speedRes = scrapeSpeedracePHP($type, (int)$tmdbId, '', '', $season, $episode);
+            if (!empty($speedRes['sources'])) {
+                $sources = $speedRes['sources'];
+                $usedSrv = 's4k';
+                break;
+            }
+        } else {
+            $streamPayload = [
+                'srv' => $altSrv,
+                't'   => $type,
+                'id'  => (int)$tmdbId,
+                'query' => ['title' => '', 'year' => '']
+            ];
+            if ($type === 'tv') {
+                $streamPayload['query']['season'] = $season;
+                $streamPayload['query']['episode'] = $episode;
+            }
+            $altRes = queryBingr('/stream', $streamPayload);
+            if (!empty($altRes['sources'])) {
+                $sources = $altRes['sources'];
+                $usedSrv = $altSrv;
+                break;
+            }
         }
     }
 }
 
-// 2. Catch multi-language subtitles
-$subPath = "/subtitles/vdrk/{$type}/{$tmdbId}";
-if ($type === 'tv') {
-    $subPath .= "?season={$season}&ep={$episode}";
+// 2. Catch multi-language subtitles (Direct VDRK with Bingr proxy fallback)
+$subtitles = [];
+$vdrkUrl = "https://sub.vdrk.site/v1/{$type}/{$tmdbId}" . ($type === 'tv' ? "/{$season}/{$episode}" : "");
+$ch = curl_init($vdrkUrl);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+curl_setopt($ch, CURLOPT_HTTPHEADER, ['User-Agent: Mozilla/5.0']);
+$directSubRaw = curl_exec($ch);
+$subStatus = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+if ($subStatus === 200 && $directSubRaw) {
+    $directSubs = json_decode($directSubRaw, true);
+    if (is_array($directSubs) && count($directSubs) > 0) {
+        foreach ($directSubs as $idx => $s) {
+            $subtitles[] = [
+                'id'    => "vdrk-direct-{$tmdbId}-{$idx}",
+                'url'   => $s['file'] ?? ($s['url'] ?? ''),
+                'lang'  => $s['lang'] ?? strtolower(substr($s['label'] ?? 'en', 0, 2)),
+                'label' => $s['label'] ?? ($s['lang'] ?? 'English')
+            ];
+        }
+    }
 }
-$subResult = queryBingr($subPath);
-$subtitles = (isset($subResult['subtitles']) && is_array($subResult['subtitles'])) ? $subResult['subtitles'] : [];
+
+if (empty($subtitles)) {
+    $subPath = "/subtitles/vdrk/{$type}/{$tmdbId}" . ($type === 'tv' ? "?season={$season}&ep={$episode}" : "");
+    $subResult = queryBingr($subPath);
+    $subtitles = (isset($subResult['subtitles']) && is_array($subResult['subtitles'])) ? $subResult['subtitles'] : [];
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -160,6 +301,26 @@ $subtitles = (isset($subResult['subtitles']) && is_array($subResult['subtitles']
           crossorigin="anonymous"
           class="w-full h-full object-contain"
         ></video>
+
+        <!-- Floating Skip Intro Button -->
+        <button
+          id="skipIntroBtn"
+          onclick="skipIntro()"
+          class="hidden absolute bottom-16 right-6 z-30 bg-purple-600/90 hover:bg-purple-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl shadow-2xl border border-purple-400/50 backdrop-blur-md flex items-center gap-2 transition-all transform hover:scale-105 active:scale-95 cursor-pointer"
+        >
+          <span>⏭️</span> Skip Intro
+        </button>
+
+        <!-- Floating Next Episode Button -->
+        <?php if ($type === 'tv'): ?>
+        <a
+          id="nextEpisodeBtn"
+          href="?tmdb=<?= htmlspecialchars($tmdbId) ?>&type=tv&season=<?= $season ?>&ep=<?= $episode + 1 ?>&srv=<?= htmlspecialchars($usedSrv) ?>"
+          class="hidden absolute bottom-16 right-6 z-30 bg-emerald-600/90 hover:bg-emerald-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl shadow-2xl border border-emerald-400/50 backdrop-blur-md flex items-center gap-2 transition-all transform hover:scale-105 active:scale-95 cursor-pointer"
+        >
+          <span>⏭️</span> Next Episode (S<?= $season ?>E<?= $episode + 1 ?>)
+        </a>
+        <?php endif; ?>
       <?php else: ?>
         <div class="absolute inset-0 flex flex-col items-center justify-center p-6 text-center">
           <p class="text-red-400 font-semibold mb-2">No active stream found on server <?= htmlspecialchars($currentSrv) ?>.</p>
@@ -297,6 +458,18 @@ $subtitles = (isset($subResult['subtitles']) && is_array($subResult['subtitles']
       }
     }
 
+    // Smart Skip Intro
+    let hasSkipped = false;
+    function skipIntro() {
+      const video = document.getElementById('videoPlayer');
+      if (video) {
+        hasSkipped = true;
+        video.currentTime = 95; // Jumps directly past the intro
+        const skipBtn = document.getElementById('skipIntroBtn');
+        if (skipBtn) skipBtn.classList.add('hidden');
+      }
+    }
+
     // Toggle Subtitles
     function switchSubtitle(trackIdx) {
       const video = document.getElementById('videoPlayer');
@@ -323,7 +496,40 @@ $subtitles = (isset($subResult['subtitles']) && is_array($subResult['subtitles']
       if (hls) hls.currentLevel = parseInt(val);
     }
 
-    window.addEventListener('DOMContentLoaded', initPlayer);
+    function setupSkipIntroEvents() {
+      const video = document.getElementById('videoPlayer');
+      const skipBtn = document.getElementById('skipIntroBtn');
+      const nextBtn = document.getElementById('nextEpisodeBtn');
+      if (!video) return;
+
+      const introStart = 15;
+      const introEnd = 95;
+
+      video.addEventListener('timeupdate', () => {
+        const cur = video.currentTime;
+        const dur = video.duration;
+
+        // Show Skip Intro button during intro window
+        if (!hasSkipped && cur >= introStart && cur <= introEnd) {
+          if (skipBtn) skipBtn.classList.remove('hidden');
+        } else {
+          if (skipBtn) skipBtn.classList.add('hidden');
+        }
+
+        // Show Next Episode button in last 60 seconds
+        if (nextBtn && dur > 0 && dur - cur <= 60) {
+          if (skipBtn) skipBtn.classList.add('hidden');
+          nextBtn.classList.remove('hidden');
+        } else if (nextBtn) {
+          nextBtn.classList.add('hidden');
+        }
+      });
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      initPlayer();
+      setupSkipIntroEvents();
+    });
   </script>
 </body>
 </html>

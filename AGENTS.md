@@ -15,8 +15,9 @@
 8. [Multi-Audio & Multi-Language Architecture](#8-multi-audio--multi-language-architecture)
 9. [Subtitle Catching & Extraction Architecture](#9-subtitle-catching--extraction-architecture)
 10. [Migration & Upgrade Guide (For Existing Integrations)](#10-migration--upgrade-guide-for-existing-integrations)
-11. [Multi-Language Implementation Reference](#11-multi-language-implementation-reference)
-12. [Agentic Guidelines & Maintenance Rules](#12-agentic-guidelines--maintenance-rules)
+11. [Skip Intro & Outro Architecture (AniSkip & Heuristic Timing)](#11-skip-intro--outro-architecture-aniskip--heuristic-timing)
+12. [Multi-Language Implementation Reference](#12-multi-language-implementation-reference)
+13. [Agentic Guidelines & Maintenance Rules](#13-agentic-guidelines--maintenance-rules)
 
 ---
 
@@ -75,17 +76,18 @@ All HTTP requests to `api.bingr.one` must include:
 
 ## 3. Scraper Cluster Directory
 
-The Bingr backend delegates scraping to specific server modules identified by server code `srv`:
+The scraper engine delegates scraping to specific server modules identified by server code `srv`, ordered strictly by **Stream Quality (4K/1080p)**, **Multi-Audio Availability**, and **Subtitle Support**:
 
-| Server ID | Cluster Name | Region | Primary Output CDN / Protocol | Reliability |
-| :--- | :--- | :--- | :--- | :--- |
-| **`s62`** | **Bastion** | IN / Global | `img1.knocw.com`, `img1.nxocw.com`, `img1.flocw.com` | ⭐⭐⭐⭐⭐ (Fastest, High CDN Quality) |
-| **`s40`** | **DarkMatter** | Global | `movie.streamrip.fun` (1080p direct HLS) | ⭐⭐⭐⭐ (Clean 1080p, High bitrates) |
-| **`s70`** | **Polaris** | US | Workers proxy + `sacdn.hakunaymatata.com` | ⭐⭐⭐⭐ (Multi-source redundancy) |
-| **`s3`** | **Edmunds** | US | `wormhole.filmu.in/proxy/m3u8` | ⭐⭐⭐ (Proxy HLS, good fallback) |
-| **`s60`** | **Vertex** | US | Secondary mirror cluster | ⭐⭐⭐ |
-| **`s30`** | **Nova** | US | Auxiliary scraper | ⭐⭐ (Frequent timeouts) |
-| **`s31`** | **Orion** | US | Auxiliary scraper | ⭐⭐ |
+| Priority | Server ID | Cluster Name | Region | Primary Output CDN / Protocol | Capabilities & Reliability |
+| :---: | :--- | :--- | :--- | :--- | :--- |
+| **1** | **`s4k`** | **PeakStorm 4K** | Global | `moon.peakstorm.top`, `sun.peakstorm.top`, `s9.vimeos.net` | ⭐⭐⭐⭐⭐ **True 4K UHD (3840×2160)**, 1080p, Open CORS |
+| **2** | **`s70`** | **Polaris** | US | Workers proxy + `sacdn.hakunaymatata.com` | ⭐⭐⭐⭐⭐ **Multi-Language Audio Dubs** & HLS v7 multi-tracks |
+| **3** | **`s40`** | **DarkMatter** | Global | `movie.streamrip.fun` | ⭐⭐⭐⭐ Clean 1080p Direct HLS, High Bitrates |
+| **4** | **`s62`** | **Bastion** | IN / Global | `img1.knocw.com`, `img1.nxocw.com`, `img1.flocw.com`, `img1.mwocx.com` | ⭐⭐⭐⭐ Fast 720p Adaptive Fallback (Masked `.jpg` Chunks) |
+| **5** | **`s3`** | **Edmunds** | US | `wormhole.filmu.in/proxy/m3u8` | ⭐⭐⭐ Proxy HLS Fallback |
+| **6** | **`s60`** | **Vertex** | US | Secondary mirror cluster | ⭐⭐⭐ |
+| **7** | **`s30`** | **Nova** | US | Auxiliary scraper | ⭐⭐ (Frequent timeouts) |
+| **8** | **`s31`** | **Orion** | US | Auxiliary scraper | ⭐⭐ |
 
 ---
 
@@ -328,21 +330,21 @@ In video streaming, failure happens at two distinct layers:
 Our scraper and video players **must proceed step-by-step through the server clusters**. If server 1 fails with an HLS fatal error, the player must immediately and automatically step to server 2, then server 3, without requiring user intervention:
 
 ```
-[ s62: Bastion ]  ──(HLS Fatal Error)──►  [ s70: Polaris ]  ──(HLS Fatal Error)──►  [ s40: DarkMatter ]
-                                                                                            │
-                                                                                    (HLS Fatal Error)
-                                                                                            ▼
-[ Embed Iframes Fallback ]  ◄──(HLS Fatal Error)──  [ s60: Vertex ]  ◄──(HLS Fatal Error)──  [ s3: Edmunds ]
+[ s4k: PeakStorm 4K ]  ──►  [ s70: Polaris ]  ──►  [ s40: DarkMatter ]  ──►  [ s62: Bastion ]
+                                                                                   │
+                                                                           (HLS Fatal Error)
+                                                                                   ▼
+[ Embed Iframes ]  ◄──  [ s31: Orion ]  ◄──  [ s30: Nova ]  ◄──  [ s61: Corvus ]  ◄──  [ s60: Vertex ]  ◄──  [ s3: Edmunds ]
 ```
 
 ---
 
 ### Client-Side HLS Fatal Error Failover Implementation
 
-In web players (`hls.js`), developers must listen to `Hls.Events.ERROR` and execute the step-by-step failover:
+In web players (`hls.js`), developers must listen to `Hls.Events.ERROR` and execute the step-by-step failover across all 9 clusters:
 
 ```javascript
-const CASCADE_SERVERS = ['s62', 's70', 's40', 's3', 's60'];
+const CASCADE_SERVERS = ['s4k', 's70', 's40', 's62', 's3', 's60', 's61', 's30', 's31'];
 let currentServerIndex = 0;
 
 function setupHlsPlayer(m3u8Url, mediaInfo) {
@@ -491,9 +493,26 @@ function handleSources(sources) {
 
 ## 9. Subtitle Catching & Extraction Architecture
 
-Bingr handles subtitles through a dedicated reverse-proxy caching network (`cache.vdrk.site` and `/api/subtitles/vdrk`). 
+Subtitles are sourced through the dedicated high-availability VDRK subtitle cluster (`sub.vdrk.site` / `cache.vdrk.site`) with dual-path resolution.
 
-### Endpoint Anatomy
+### Primary Path: Direct Open-CORS VDRK Subtitle Cluster
+
+Direct client requests can query the VDRK edge cluster without going through the Bingr API proxy:
+
+```http
+# Movies:
+GET https://sub.vdrk.site/v1/movie/{tmdbId} HTTP/1.1
+
+# TV Series Episodes:
+GET https://sub.vdrk.site/v1/tv/{tmdbId}/{season}/{episode} HTTP/1.1
+```
+
+- **CORS Status**: `Access-Control-Allow-Origin: *`
+- **Output**: Array of `{ label: string, file: string }` containing direct `.vtt` WebVTT links.
+
+---
+
+### Secondary Path: Bingr API Subtitle Proxy (Fallback)
 
 ```http
 GET https://api.bingr.one/api/subtitles/vdrk/{type}/{tmdbId}?season={season}&ep={episode} HTTP/1.1
@@ -552,16 +571,45 @@ Referer: https://bingr.one/watch/{type}/{tmdbId}
 
 ## 10. Migration & Upgrade Guide (For Existing Integrations)
 
-If you previously integrated an older version of our scraper that only extracted a single M3U8 stream without subtitle and dub audio support, follow this guide to upgrade your project in minutes.
+> 📘 **Looking for a standalone migration manual?** Check the dedicated [UPGRADE_GUIDE.md](file:///c:/Users/HP/Pictures/Screenshots/ANIM/bingr-m3u8-scraper/UPGRADE_GUIDE.md) for quick copy-paste snippets.
+
+If you previously integrated an older version of our scraper that only extracted a single M3U8 stream without 4K, subtitles, or dub audio support, follow this guide to upgrade your project in minutes.
 
 ### What Changed? (Before vs After)
 
 | Feature | Old Integration | Upgraded Integration |
 | :--- | :--- | :--- |
-| **Subtitle Catching** | Empty array `subtitles: []` | Populated array with 1–90+ WebVTT subtitle URLs |
+| **Top Video Quality** | 720p / 1080p max (`s62`, `s40`) | **True 4K UHD (3840×2160)** & 1080p (`s4k` PeakStorm) |
+| **Subtitle Catching** | Empty array `subtitles: []` | Populated array with 1–89+ WebVTT subtitle URLs (Direct VDRK) |
 | **Audio Dubs** | Single pre-muxed audio only | Dual-Layer: HLS tracks + multi-stream language selector |
+| **Server Priority** | `s62` (Bastion 720p) first | `s4k` (4K) → `s70` (Dubs) → `s40` (1080p) → `s62` (720p) |
 | **Video Player** | Basic HLS play without `<track>` | Full closed-captions toggle & language switcher |
 | **CORS Compatibility** | Native video only | `crossorigin="anonymous"` for remote `.vtt` tracks |
+
+---
+
+### Troubleshooting: Why Multi-Audio & Subtitles Are "Not Listing" or "Not Working"
+
+Many website owners report that multi-audio or subtitles fail to show up in their players. Below are the **exact technical root causes** and **guaranteed solutions**:
+
+#### 1. Subtitles Fail to Render or Are Silently Blocked
+* **Root Cause**: The HTML5 `<video>` tag is missing the `crossorigin="anonymous"` attribute.
+  Browsers enforce strict CORS security on WebVTT files. Even if the subtitle CDN sends open CORS headers (`Access-Control-Allow-Origin: *`), the browser blocks text tracks unless the `<video>` element explicitly declares `crossorigin="anonymous"`.
+* **Fix**:
+  ```html
+  <video id="myPlayer" controls playsinline crossorigin="anonymous"></video>
+  ```
+
+#### 2. Subtitles Array is Empty (`subtitles: []`)
+* **Root Cause**: Older scraper versions only called `POST /api/stream` and never queried the subtitle service.
+* **Fix**: The upgraded scraper automatically queries the **Direct VDRK Cluster** (`https://sub.vdrk.site/v1/{type}/{id}`) and merges the complete multi-language track list before returning results.
+
+#### 3. Multi-Audio Selector Stays Empty (`hls.audioTracks.length === 0`)
+* **Root Cause**:
+  In default 720p streams (`s62` Bastion), audio is **pre-multiplexed inside the MPEG-TS packets**. There are no separate `#EXT-X-MEDIA:TYPE=AUDIO` tags inside the M3U8 manifest. Thus, web players report zero audio tracks.
+* **Fix**:
+  1. Priority order now places `s4k` and `s70` ahead of `s62`. Server `s70` (Polaris) provides dedicated multi-language streams (English, Hindi, Spanish, Russian, etc.) and HLS v7 master manifests with internal audio tracks.
+  2. Implement the **Dual-Layer Audio Pattern**: Listen to `hls.on(Hls.Events.AUDIO_TRACKS_UPDATED)` for in-manifest tracks, and fall back to switching the active stream URL from the scraper's `sources` array for stream-level language dubs.
 
 ---
 
@@ -751,17 +799,209 @@ When integrating video playback in scripts like `play.php` or custom frontend vi
 #### Server Directory Reference:
 ```html
 <select id="srvSelect" onchange="switchScraperServer(this.value)">
-  <option value="s62">Bastion (Default — KNOCW / NXOCW CDN)</option>
+  <option value="s4k">PeakStorm 4K (SpeedRace 4K UHD & 1080p Direct)</option>
   <option value="s70">Polaris (Multi-Language Dubs / HLS v7)</option>
   <option value="s40">DarkMatter (StreamRip 1080p Direct)</option>
+  <option value="s62">Bastion (KNOCW / NXOCW CDN)</option>
   <option value="s3">Edmunds (Filmu Proxy)</option>
   <option value="s60">Vertex (Alternate)</option>
+  <option value="s61">Corvus</option>
+  <option value="s30">Nova</option>
+  <option value="s31">Orion</option>
 </select>
 ```
 
 ---
 
-## 11. Multi-Language Implementation Reference
+### Step 4: Adding Floating "Skip Intro" & "Next Episode" to Existing Web Players
+
+To match modern streaming platforms (Netflix, Crunchyroll, VidLink, Boomflix), existing web player embeds can add one-click Skip Intro and Next Episode buttons:
+
+#### A. Video Container Markup
+```html
+<div class="player-container" style="position: relative; max-width: 100%;">
+  <video id="myPlayer" controls playsinline crossorigin="anonymous" style="width: 100%;"></video>
+
+  <!-- Floating Skip Intro Button -->
+  <button id="skipIntroBtn" onclick="skipIntro()" style="display:none; position:absolute; bottom:65px; right:20px; z-index:40; background:rgba(99,102,241,0.95); color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.5); font-family:sans-serif;">
+    ⏭️ Skip Intro
+  </button>
+
+  <!-- Floating Next Episode Button -->
+  <button id="nextEpBtn" onclick="playNextEpisode()" style="display:none; position:absolute; bottom:65px; right:20px; z-index:40; background:rgba(16,185,129,0.95); color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.5); font-family:sans-serif;">
+    ⏭️ Next Episode
+  </button>
+</div>
+```
+
+#### B. JavaScript Timing & Skip Controller
+```javascript
+let hasSkippedIntro = false;
+let introStart = 15; // Set dynamically from AniSkip or fallback to 15s
+let introEnd = 95;   // Set dynamically from AniSkip or fallback to 95s
+
+const video = document.getElementById('myPlayer');
+const skipBtn = document.getElementById('skipIntroBtn');
+const nextBtn = document.getElementById('nextEpBtn');
+
+// Monitor playback time
+video.addEventListener('timeupdate', () => {
+  const cur = video.currentTime;
+
+  // Show Skip Intro during opening sequence
+  if (!hasSkippedIntro && cur >= introStart && cur <= introEnd) {
+    skipBtn.style.display = 'block';
+  } else {
+    skipBtn.style.display = 'none';
+  }
+
+  // Show Next Episode when remaining time < 120s
+  if (video.duration && (video.duration - cur <= 120)) {
+    nextBtn.style.display = 'block';
+  } else {
+    nextBtn.style.display = 'none';
+  }
+});
+
+// Jump past intro sequence
+function skipIntro() {
+  hasSkippedIntro = true;
+  video.currentTime = introEnd;
+  skipBtn.style.display = 'none';
+}
+```
+
+---
+
+## 11. Skip Intro & Outro Architecture (AniSkip & Heuristic Timing)
+
+Modern video streaming portals (e.g., Netflix, Crunchyroll, VidLink, Boomflix) allow viewers to seamlessly skip show opening sequences ("Skip Intro") and jump to subsequent episodes when closing credits roll ("Skip Outro / Next Episode").
+
+### The Architectural Problem:
+Standard HLS (`.m3u8`) and MPEG-TS manifests do not embed chapter markers, opening timestamps, or intro start/end boundaries. Therefore, **"Skip Intro" is implemented client-side** by cross-referencing playback time (`video.currentTime`) against an external timing provider or heuristic calculation.
+
+### 1. AniSkip Integration (Anime & Asian Animation)
+For anime, the engine integrates directly with the **AniSkip Open API** (`api.aniskip.com`), which maintains community-verified millisecond timestamps for openings (`op`) and endings (`ed`).
+
+#### Endpoint Specification:
+```http
+GET https://api.aniskip.com/v2/skip-times/{malId}/{episode}?types[]=op&types[]=ed&episodeLength=0 HTTP/1.1
+Host: api.aniskip.com
+Accept: application/json
+```
+
+#### JSON Response Schema:
+```json
+{
+  "found": true,
+  "results": [
+    {
+      "interval": {
+        "startTime": 513.2,
+        "endTime": 603.2
+      },
+      "skipType": "op",
+      "skipId": "b8f590...",
+      "episodeLength": 1420.0
+    },
+    {
+      "interval": {
+        "startTime": 1330.0,
+        "endTime": 1420.0
+      },
+      "skipType": "ed",
+      "skipId": "a9c144..."
+    }
+  ]
+}
+```
+
+### 2. Universal Heuristic Fallback (Western TV Series)
+Broadcast and streaming Western TV series adhere to standard pacing conventions:
+- **Cold Open**: Typically 10 to 30 seconds before the title sequence.
+- **Intro Title Sequence**: 45 to 80 seconds in duration.
+- **Intro End**: Concludes by second 85 to 95 of playback.
+
+When no third-party database record is returned, the engine implements a **smart heuristic timing window**:
+- **Start**: `15.0s`
+- **End**: `95.0s`
+- **Skip Delta**: Jump forward `+80s` directly to the start of Act I.
+- **Outro Detection**: Automatically offers "Next Episode" when remaining duration is under 120 seconds (`video.currentTime >= video.duration - 120`).
+
+### 3. Engine API Implementation (`scraper.js`)
+The Node.js engine provides `getSkipTimes()`:
+```javascript
+const { getSkipTimes } = require('./scraper');
+
+// Query skip points for anime or TV
+const times = await getSkipTimes(1735, 1);
+if (times.hasOp) {
+  console.log(`Skip Intro Available: ${times.op.start}s -> ${times.op.end}s (+${times.op.skipDuration}s)`);
+}
+```
+
+CLI inspection tool:
+```bash
+node cli.js skip 1735 1
+# Output: [AniSkip] Found Opening (op): 513s -> 603s (Skip: +90s)
+```
+
+### 4. Client-Side Player Integration (HTML5 & Hls.js)
+To add interactive floating buttons to any video player:
+
+```html
+<div class="video-container" style="position: relative; max-width: 100%;">
+  <video id="myPlayer" controls playsinline crossorigin="anonymous"></video>
+
+  <!-- Floating Skip Intro Button -->
+  <button id="skipIntroBtn" onclick="skipIntro()" style="display:none; position:absolute; bottom:70px; right:25px; z-index:40; background:rgba(99,102,241,0.9); color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.5);">
+    ⏭️ Skip Intro
+  </button>
+
+  <!-- Floating Next Episode Button -->
+  <button id="nextEpBtn" onclick="playNextEpisode()" style="display:none; position:absolute; bottom:70px; right:25px; z-index:40; background:rgba(16,185,129,0.9); color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.5);">
+    ⏭️ Next Episode
+  </button>
+</div>
+
+<script>
+let hasSkippedIntro = false;
+const introStart = 15; // or times.op.start
+const introEnd = 95;   // or times.op.end
+
+const video = document.getElementById('myPlayer');
+const skipBtn = document.getElementById('skipIntroBtn');
+
+video.addEventListener('timeupdate', () => {
+  const cur = video.currentTime;
+  
+  // Show Skip Intro during intro interval
+  if (!hasSkippedIntro && cur >= introStart && cur <= introEnd) {
+    skipBtn.style.display = 'block';
+  } else {
+    skipBtn.style.display = 'none';
+  }
+
+  // Show Next Episode when outro starts or remaining time < 2 mins
+  const nextBtn = document.getElementById('nextEpBtn');
+  if (video.duration && (video.duration - cur <= 120)) {
+    nextBtn.style.display = 'block';
+  } else {
+    nextBtn.style.display = 'none';
+  }
+});
+
+function skipIntro() {
+  hasSkippedIntro = true;
+  video.currentTime = introEnd;
+  skipBtn.style.display = 'none';
+}
+</script>
+```
+
+---
+
+## 12. Multi-Language Implementation Reference
 
 ### A. Node.js Native
 ```javascript
@@ -841,7 +1081,7 @@ A full, production-ready standalone PHP video player is available at [`play.php`
 
 ---
 
-## 12. Agentic Guidelines & Maintenance Rules
+## 13. Agentic Guidelines & Maintenance Rules
 
 When configuring, enhancing, or wrapping this scraper in subagents or automation:
 
