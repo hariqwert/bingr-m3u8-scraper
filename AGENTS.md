@@ -1,1097 +1,303 @@
-# 🤖 AGENTS.md — Bingr M3U8 HLS Stream Scraper Engine
+# 🤖 AGENTS.md — Anime M3U8 HLS Stream Scraper Engine
 
-> **Comprehensive Technical Architecture, Reverse-Engineered Network Protocols, and Operational Specifications for Movies, TV Seasons, and Episodes.**
+> **Comprehensive Technical Architecture, Reverse-Engineered Network Protocols, and Operational Specifications Exclusively for Anime Streams (5-Server Cluster + AniSkip Engine).**
 
 ---
 
 ## 📑 Table of Contents
 1. [System Overview & Architecture](#1-system-overview--architecture)
-2. [Origin & Anti-Bot Bypass Protocol](#2-origin--anti-bot-bypass-protocol)
-3. [Scraper Cluster Directory](#3-scraper-cluster-directory)
-4. [Movie Scraping Specification](#4-movie-scraping-specification)
-5. [TV Series Scraping Specification (Seasons & Episodes)](#5-tv-series-scraping-specification-seasons--episodes)
-6. [HLS CDN Anatomy & Segment Masking](#6-hls-cdn-anatomy--segment-masking)
-7. [Dual-Layer Auto-Failover Cascade & HLS Fatal Error Recovery](#7-dual-layer-auto-failover-cascade--hls-fatal-error-recovery)
-8. [Multi-Audio & Multi-Language Architecture](#8-multi-audio--multi-language-architecture)
-9. [Subtitle Catching & Extraction Architecture](#9-subtitle-catching--extraction-architecture)
-10. [Migration & Upgrade Guide (For Existing Integrations)](#10-migration--upgrade-guide-for-existing-integrations)
-11. [Skip Intro & Outro Architecture (AniSkip & Heuristic Timing)](#11-skip-intro--outro-architecture-aniskip--heuristic-timing)
-12. [Multi-Language Implementation Reference](#12-multi-language-implementation-reference)
-13. [Agentic Guidelines & Maintenance Rules](#13-agentic-guidelines--maintenance-rules)
+2. [Ryuu Gateway Authentication & Anti-Bot Protocol](#2-ryuu-gateway-authentication--anti-bot-protocol)
+3. [The 5 Anime Scraper Server Clusters](#3-the-5-anime-scraper-server-clusters)
+4. [Anime Metadata & Episode Indexing](#4-anime-metadata--episode-indexing)
+5. [Fallback Architecture: AnimeSalt Multi-Audio Engine](#5-fallback-architecture-animesalt-multi-audio-engine)
+6. [AniSkip Automated Skip Intro & Outro Architecture](#6-aniskip-automated-skip-intro--outro-architecture)
+7. [Subtitle Extraction & WebVTT Handling](#7-subtitle-extraction--webvtt-handling)
+8. [Player Integration & Dynamic Skip Event Lifecycle](#8-player-integration--dynamic-skip-event-lifecycle)
+9. [REST Microservice API Specification](#9-rest-microservice-api-specification)
+10. [Command-Line Interface (`anime_cli.js`)](#10-command-line-interface-anime_clijs)
+11. [Speed Race & Latency Optimization](#11-speed-race--latency-optimization)
+12. [Agentic Guidelines & Operational Maintenance Rules](#12-agentic-guidelines--operational-maintenance-rules)
 
 ---
 
 ## 1. System Overview & Architecture
 
-`bingr.one` utilizes a distributed backend edge cluster (`https://api.bingr.one/api`) that aggregates and scrapes live streaming media across multiple third-party storage networks, CDNs, and scraper providers.
+This scraper is a specialized, zero-dependency streaming extraction engine designed **exclusively for Anime**. It reverse-engineers the anime pipeline used by high-performance streaming frontends, bypassing cloud security barriers to retrieve direct HLS (`.m3u8`) master playlists.
 
-### High-Level Data Flow:
+### High-Level Anime Data Flow:
 
 ```
-[Client / Agent]
+[Client / Player / CLI]
        │
-       ├──► 1. Query TMDB Metadata / Episode Index
-       │         GET https://api.bingr.one/api/details/tv/:id
-       │         GET https://api.bingr.one/api/episodes/:id/:season
+       ├──► 1. Query AniList / Bingr Anime Metadata & Episode Index
+       │         POST https://graphql.anilist.co (title, cover, MAL ID, score)
+       │         GET  https://api.bingr.one/api/anime/:id/episodes?chunk=:chunk
        │
-       ├──► 2. Dispatch Scraper Request with Origin Headers
-       │         POST https://api.bingr.one/api/stream
-       │         Payload: { srv, t: "movie" | "tv", id, query }
+       ├──► 2. Acquire Ryuu Gateway Session Token
+       │         POST https://hianime.filmu.in/token
+       │         Returns: { token: "eyJhbGciOi..." } (JWT with 2h expiration)
        │
-       ▼
-[Bingr Edge API Gateway (api.bingr.one)]
+       ├──► 3. Extract 5-Server Anime Stream Cluster
+       │         GET  https://hianime.filmu.in/ryuu/streams?anilistId=:id&ep=:ep&type=sub|dub
+       │         Headers: x-api-key: <token>
+       │         │
+       │         ├── [beep] AnimeApps CDN (cached direct .m3u8)
+       │         ├── [yuki] MegaPlay / NexaBloom (multi-language sub HLS master)
+       │         ├── [neko] BibiEmbed / Cloudflare Edge Workers (.m3u8)
+       │         ├── [zuna] AniWatch / ZokoAnime / HiAnime master
+       │         └── [loli] EchoVideo CDN direct stream
        │
-       ├──► Scraper Clusters:
-       │      ├─ [s62] Bastion   ──► KNOCW / NXOCW / FLOCW CDN (.m3u8)
-       │      ├─ [s40] DarkMatter──► StreamRip 1080p (.m3u8)
-       │      ├─ [s70] Polaris   ──► Cloudflare Worker Multi-CDN
-       │      └─ [s3]  Edmunds   ──► Filmu Proxy
-       ▼
-[Tokenized M3U8 HLS Stream + Subtitles]
-       ▼
-[Direct Playback via Hls.js / VLC / Mobile Player]
+       └──► 4. Query Automated AniSkip Opening / Ending Intervals
+                 GET  https://api.aniskip.com/v2/skip-times/:idMal/:ep?types[]=op&types[]=ed&episodeLength=0
+                 Returns: [{ start, end, type: "op"|"ed", label: "Skip Intro"|"Skip Ending" }]
 ```
 
 ---
 
-## 2. Origin & Anti-Bot Bypass Protocol
+## 2. Ryuu Gateway Authentication & Anti-Bot Protocol
 
-Direct browser requests (`fetch()` from unauthorized origins) to `https://api.bingr.one` return **`403 Forbidden`**. The API enforces strict header verification at Cloudflare / Nginx edge reverse proxies.
+The anime scraper cluster requires edge gateway authentication via `hianime.filmu.in`. Direct unauthenticated requests to stream endpoints result in `401 Unauthorized` (`NO_TOKEN`).
 
-### Mandatory Request Headers:
-All HTTP requests to `api.bingr.one` must include:
-
-| Header | Required Value | Notes |
-| :--- | :--- | :--- |
-| **`Origin`** | `https://bingr.one` | Strictly enforced |
-| **`Referer`** | `https://bingr.one/watch/...` | Must match watch route context |
-| **`User-Agent`** | Standard modern desktop browser string | Avoid automated default headers |
-| **`Content-Type`** | `application/json` | Required on `POST /api/stream` |
-
-#### Contextual Referer Generation:
-- **For Movies**: `https://bingr.one/watch/movie/${tmdbId}`
-- **For TV Episodes**: `https://bingr.one/watch/tv/${tmdbId}/${season}/${episode}`
-
----
-
-## 3. Scraper Cluster Directory
-
-The scraper engine delegates scraping to specific server modules identified by server code `srv`, ordered strictly by **Stream Quality (4K/1080p)**, **Multi-Audio Availability**, and **Subtitle Support**:
-
-| Priority | Server ID | Cluster Name | Region | Primary Output CDN / Protocol | Capabilities & Reliability |
-| :---: | :--- | :--- | :--- | :--- | :--- |
-| **1** | **`s4k`** | **PeakStorm 4K** | Global | `moon.peakstorm.top`, `sun.peakstorm.top`, `s9.vimeos.net` | ⭐⭐⭐⭐⭐ **True 4K UHD (3840×2160)**, 1080p, Open CORS |
-| **2** | **`s70`** | **Polaris** | US | Workers proxy + `sacdn.hakunaymatata.com` | ⭐⭐⭐⭐⭐ **Multi-Language Audio Dubs** & HLS v7 multi-tracks |
-| **3** | **`s40`** | **DarkMatter** | Global | `movie.streamrip.fun` | ⭐⭐⭐⭐ Clean 1080p Direct HLS, High Bitrates |
-| **4** | **`s62`** | **Bastion** | IN / Global | `img1.knocw.com`, `img1.nxocw.com`, `img1.flocw.com`, `img1.mwocx.com` | ⭐⭐⭐⭐ Fast 720p Adaptive Fallback (Masked `.jpg` Chunks) |
-| **5** | **`s3`** | **Edmunds** | US | `wormhole.filmu.in/proxy/m3u8` | ⭐⭐⭐ Proxy HLS Fallback |
-| **6** | **`s60`** | **Vertex** | US | Secondary mirror cluster | ⭐⭐⭐ |
-| **7** | **`s30`** | **Nova** | US | Auxiliary scraper | ⭐⭐ (Frequent timeouts) |
-| **8** | **`s31`** | **Orion** | US | Auxiliary scraper | ⭐⭐ |
-
----
-
-## 4. Movie Scraping Specification
-
-### Step 1: TMDB Movie Metadata (Optional but Recommended)
-To retrieve the movie's official title and release year for exact query matching:
-
+### Step 1: Session Token Acquisition
 ```http
-GET https://api.bingr.one/api/details/movie/1108427 HTTP/1.1
-Host: api.bingr.one
-Origin: https://bingr.one
-Referer: https://bingr.one/
+POST https://hianime.filmu.in/token HTTP/1.1
+Host: hianime.filmu.in
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 ```
 
-**Response Sample:**
+#### Response:
 ```json
 {
-  "id": 1108427,
-  "type": "movie",
-  "title": "Kill",
-  "year": "2024",
-  "poster": "https://image.tmdb.org/t/p/w500/gaet1xQ2nxrG0V1Ep9T20ZMNEIC.jpg",
-  "backdrop": "https://image.tmdb.org/t/p/w1280/c6BPbkO5Npt1OdwttAxCF.jpg",
-  "overview": "When army commando Amrit finds out his true love...",
-  "runtime": 105
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpcCI6IjE2Mi4xNTguMTYzLjIyMyIsImlhdCI6MTc4OTIzOTMzNiwiZXhwIjoxNzg5MjUwMTM2fQ..."
 }
 ```
+* **Payload**: Includes client IP binding and a 2.5-hour expiration timestamp.
+* **Token Caching**: Tokens are cached in-memory and renewed automatically upon expiry.
 
-### Step 2: Stream Extraction Request
-
+### Step 2: Stream Request Header
+All downstream stream requests must pass the token in the `x-api-key` header:
 ```http
-POST https://api.bingr.one/api/stream HTTP/1.1
-Host: api.bingr.one
-Origin: https://bingr.one
-Referer: https://bingr.one/watch/movie/1108427
-Content-Type: application/json
-
-{
-  "srv": "s62",
-  "t": "movie",
-  "id": 1108427,
-  "query": {
-    "title": "Kill",
-    "year": "2024"
-  }
-}
-```
-
-**Response Sample:**
-```json
-{
-  "scraperName": "Bastion",
-  "sources": [
-    {
-      "url": "https://img1.knocw.com/myhls_mps/2024/7yue/Kill_Hindi_720/index_338.m3u8?auth_key=ZVhYr3ij4RVSBBKCfAaXb6DekFkyrbDiEYPo%2BF1kDmM%3D&expire=1789070151646",
-      "quality": "720p",
-      "type": "application/x-mpegurl",
-      "label": "Bastion #0",
-      "name": "720p"
-    }
-  ],
-  "subtitles": []
-}
+x-api-key: eyJhbGciOiJIUzI1Ni...
 ```
 
 ---
 
-## 5. TV Series Scraping Specification (Seasons & Episodes)
+## 3. The 5 Anime Scraper Server Clusters
 
-TV series require a **3-tier resolution sequence**:
-1. Show Discovery & Seasons Count
-2. Season Episode Enumeration
-3. Targeted Episode Stream Scraping
+When an episode is requested, the engine resolves streams across **5 specialized anime providers**:
 
-### Level 1: TV Show Metadata & Seasons Discovery
-```http
-GET https://api.bingr.one/api/details/tv/1396 HTTP/1.1
-Host: api.bingr.one
-Origin: https://bingr.one
-Referer: https://bingr.one/
-```
-
-**Response Sample:**
-```json
-{
-  "id": 1396,
-  "type": "tv",
-  "title": "Breaking Bad",
-  "year": "2008",
-  "seasons": [
-    { "season": 1, "episodes": 7 },
-    { "season": 2, "episodes": 13 },
-    { "season": 3, "episodes": 13 },
-    { "season": 4, "episodes": 13 },
-    { "season": 5, "episodes": 16 }
-  ]
-}
-```
-
-### Level 2: Enumerate Season Episodes
-Fetch episode numbers, titles, overviews, and stills for Season `N`:
-
-```http
-GET https://api.bingr.one/api/episodes/1396/1 HTTP/1.1
-Host: api.bingr.one
-Origin: https://bingr.one
-Referer: https://bingr.one/watch/tv/1396/1/1
-```
-
-**Response Sample:**
-```json
-{
-  "episodes": [
-    {
-      "episode": 1,
-      "title": "Pilot",
-      "overview": "When an unassuming high school chemistry teacher...",
-      "still": "https://image.tmdb.org/t/p/w300/88Z0fMP8a88EpQWMCs1593G0ngu.jpg",
-      "air_date": "2008-01-20",
-      "rating": 8.485
-    },
-    {
-      "episode": 2,
-      "title": "Cat's in the Bag...",
-      "overview": "Walt and Jesse attempt to clean up...",
-      "still": "https://image.tmdb.org/t/p/w300/r54N1y37FfF4rQW99zUuR.jpg",
-      "air_date": "2008-01-27",
-      "rating": 8.237
-    }
-  ]
-}
-```
-
-### Level 3: Scrape Specific Episode Stream
-To scrape Season `1`, Episode `1`:
-
-```http
-POST https://api.bingr.one/api/stream HTTP/1.1
-Host: api.bingr.one
-Origin: https://bingr.one
-Referer: https://bingr.one/watch/tv/1396/1/1
-Content-Type: application/json
-
-{
-  "srv": "s62",
-  "t": "tv",
-  "id": 1396,
-  "query": {
-    "title": "Breaking Bad",
-    "year": "2008",
-    "season": 1,
-    "episode": 1
-  }
-}
-```
-
-**Response Sample:**
-```json
-{
-  "scraperName": "Bastion",
-  "sources": [
-    {
-      "url": "https://img1.flocw.com/hls_mps/57ba6bd962339881cd96be7ca2b42efec15f8b8e/720/index_306.m3u8?auth_key=3%2B4dD4Hpb0V9rCpVut3MlUfWw7ECGlYh0ekOD4nJ3EA%3D&expire=1789071117842",
-      "quality": "720p",
-      "type": "application/x-mpegurl"
-    },
-    {
-      "url": "https://img1.hoxcv.com/hls_mps/57ba6bd962339881cd96be7ca2b42efec15f8b8e/480/index_323.m3u8?auth_key=s1OUEvWVa5kFHCm4%2BnBoHRqJkwEiME1eEV%2F0rFqmY3Q%3D&expire=1789071117462",
-      "quality": "480p",
-      "type": "application/x-mpegurl"
-    }
-  ],
-  "subtitles": []
-}
-```
+| Server | Origin Provider | Stream Format | Subtitle Support | Characteristics |
+| :--- | :--- | :--- | :--- | :--- |
+| **`beep`** | **AnimeApps / PlayEng CDN** (`playeng.animeapps.top`) | Direct HD `.m3u8` master (`/r2/cachehd/.../index.m3u8`) | Embedded or Direct VTT | Pre-cached ultra-low latency streams; highest availability for mainstream titles. |
+| **`yuki`** | **MegaPlay / NexaBloom / VidCloud** (`megaplay.buzz`) | Dynamic tokenized `.m3u8` master (`megap.shiora.top`) | Multi-language WebVTT (English, Spanish, Portuguese, French, etc.) | High-bitrate master playlists with full global subtitle coverage. |
+| **`neko`** | **BibiEmbed / Cloudflare Edge Workers** (`*.vibevibe.workers.dev`) | Worker-routed HLS stream | In-stream | Proxied through Cloudflare serverless edge nodes to bypass geo-restrictions. |
+| **`zuna`** | **AniWatch / ZokoAnime / HiAnime** (`hls2.aniwatchtv.uk`) | Direct AniWatch CDN master (`/v/.../master.m3u8`) | English & Multi-Language VTT | Direct CDN connection to AniWatch/HiAnime infrastructure with high reliability. |
+| **`loli`** | **EchoVideo / AnimeWave** (`play2.echovideo.ru`) | EchoVideo CDN HLS master (`hlsx3cdn.echovideo.to`) | In-stream | Russian & European high-bandwidth mirror CDN with signed session query tokens. |
 
 ---
 
-## 6. HLS CDN Anatomy & Segment Masking
-
-The extracted HLS playlists use advanced CDN architectures designed for edge caching:
-
-### 1. Structure of Scraped M3U8 Playlists:
-```m3u8
-#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:10
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:3.128122,
-https://img.nxocw.com/hls_mps/43110932bb55675ccad49b1bd15a26cfd03941b8/720/0.jpg?t=1782550736
-#EXTINF:3.086422,
-https://img.nxocw.com/hls_mps/43110932bb55675ccad49b1bd15a26cfd03941b8/720/1.jpg?t=1782550736
-```
-
-### 2. Segment Disguising Technique:
-- The segment URIs end with `.jpg` (e.g. `0.jpg`, `1.jpg`) rather than `.ts`.
-- **Payload Reality**: Each `.jpg` file is actually a pure **MPEG-2 Transport Stream (MPEG-TS)** chunk.
-- **Sync Byte Verification**: Inspecting byte 0 of any segment confirms the standard MPEG-TS sync byte:
-  ```
-  Byte 0: 0x47  (Hex: 47 40 11 10...)
-  ```
-- **Browser Compatibility**: Both Apple HLS native players (iOS / Safari) and JavaScript MSE players (`hls.js`, `video.js`) parse these `.jpg` video chunks natively without transcoding.
-
-### 3. Open CORS Headers:
-Unlike the scraping gateway (`api.bingr.one`), the video CDNs (`img1.nxocw.com`, `img1.knocw.com`, `img1.flocw.com`) serve:
-```http
-Access-Control-Allow-Origin: *
-```
-This enables direct client-side playback without proxying video bandwidth through your own server.
-
----
-
----
-
-## 7. Dual-Layer Auto-Failover Cascade & HLS Fatal Error Recovery
-
-A fundamental principle of resilient video streaming: **A scrape is NOT successful merely because the API returned an HTTP 200 with an M3U8 link.**
-
-### The Core Definition of "Failure"
-
-In video streaming, failure happens at two distinct layers:
-
-1. **Backend / Scrape Failure**:
-   - `/api/stream` returns HTTP 4xx/5xx.
-   - `/api/stream` returns an empty sources array: `sources: []`.
-2. **Playback Runtime Failure ("Failed" = HLS Fatal Error)**:
-   - The API returned an M3U8 URL, but when loaded into Hls.js or the browser engine, it triggers an **HLS Fatal Error** (`data.fatal === true`).
-   - Common causes of HLS fatal errors:
-     - **Manifest 404/410**: Video removed or path expired on the CDN.
-     - **Token Expiry (403 Forbidden)**: `expire` timestamp elapsed or signature failed.
-     - **ISP / DNS Domain Blocking**: Local ISP (e.g. Jio, Airtel, Vodafone) blocked the CDN domain (`img1.nxocw.com`).
-     - **CORS Failure**: Origin headers rejected by client browser.
-     - **Buffer Stalling & Corrupt Segments**: Non-recoverable `Hls.ErrorTypes.MEDIA_ERROR`.
-
----
-
-### Step-by-Step Auto-Failover Cascade
-
-Our scraper and video players **must proceed step-by-step through the server clusters**. If server 1 fails with an HLS fatal error, the player must immediately and automatically step to server 2, then server 3, without requiring user intervention:
-
-```
-[ s4k: PeakStorm 4K ]  ──►  [ s70: Polaris ]  ──►  [ s40: DarkMatter ]  ──►  [ s62: Bastion ]
-                                                                                   │
-                                                                           (HLS Fatal Error)
-                                                                                   ▼
-[ Embed Iframes ]  ◄──  [ s31: Orion ]  ◄──  [ s30: Nova ]  ◄──  [ s61: Corvus ]  ◄──  [ s60: Vertex ]  ◄──  [ s3: Edmunds ]
-```
-
----
-
-### Client-Side HLS Fatal Error Failover Implementation
-
-In web players (`hls.js`), developers must listen to `Hls.Events.ERROR` and execute the step-by-step failover across all 9 clusters:
-
-```javascript
-const CASCADE_SERVERS = ['s4k', 's70', 's40', 's62', 's3', 's60', 's61', 's30', 's31'];
-let currentServerIndex = 0;
-
-function setupHlsPlayer(m3u8Url, mediaInfo) {
-  if (hlsInstance) hlsInstance.destroy();
-
-  hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: true });
-  hlsInstance.loadSource(m3u8Url);
-  hlsInstance.attachMedia(videoElement);
-
-  // CRITICAL: Step-by-step failover on HLS fatal error
-  hlsInstance.on(Hls.Events.ERROR, async (event, data) => {
-    if (data.fatal) {
-      console.warn(`[CASCADE] HLS Fatal Error on server [${CASCADE_SERVERS[currentServerIndex]}]:`, data.details);
-      
-      // Destroy current broken instance
-      hlsInstance.destroy();
-
-      // Step to next scraper server
-      currentServerIndex++;
-      if (currentServerIndex < CASCADE_SERVERS.length) {
-        const nextServer = CASCADE_SERVERS[currentServerIndex];
-        console.log(`[CASCADE] Stepping automatically to next server: [${nextServer}]...`);
-        
-        // Re-scrape with next server ID
-        const nextStream = await fetchStreamFromServer(mediaInfo.type, mediaInfo.id, nextServer);
-        if (nextStream && nextStream.primaryM3u8) {
-          setupHlsPlayer(nextStream.primaryM3u8, mediaInfo);
-          return;
-        }
-      }
-
-      // If all HLS server clusters encounter fatal errors, transition to embed iframe
-      console.error('[CASCADE] All HLS scraper clusters failed. Falling back to embed player.');
-      switchToEmbedFallback(mediaInfo);
-    }
-  });
-}
-```
-
----
-
-### Backend Auto-Cascade (Query Phase)
-
-Before video playback begins, the backend library (`scraper.js`) implements Phase 1 cascade:
-
-```javascript
-const SERVERS = ['s62', 's70', 's40', 's3', 's60'];
-
-for (const srv of SERVERS) {
-  try {
-    const result = await queryServer(srv, mediaType, tmdbId, query);
-    if (result && result.sources && result.sources.length > 0) {
-      return result; // First successful working scrape found
-    }
-  } catch (err) {
-    // Continue to next server cluster
-  }
-}
-// If all primary scrapers fail to return sources, return embed fallback URLs
-return fallbackEmbeds;
-```
-
----
-
----
-
-## 8. Multi-Audio & Multi-Language Architecture
-
-A common question when scraping M3U8 streams is: **Why does the audio track selector in standard HLS players stay empty?**
-
-### The Root Cause: Pre-Muxed vs Master HLS Streams
-
-Bingr uses multiple backend server clusters with fundamentally different encoding pipelines:
-
-#### 1. Pre-Muxed Streams (`s62` Bastion / `img1.nxocw.com` CDN)
-- When scraping default server `s62`, the CDN returns a stream like `Kill_Hindi_720/index_338.m3u8`.
-- In this manifest:
-  ```m3u8
-  #EXTM3U
-  #EXT-X-VERSION:3
-  #EXT-X-TARGETDURATION:10
-  #EXTINF:3.128122,
-  https://img.nxocw.com/hls_mps/.../720/0.jpg
-  ```
-- **No `#EXT-X-MEDIA:TYPE=AUDIO` tags exist.**
-- The audio (e.g., Hindi AAC) is **multiplexed directly into the MPEG-TS transport packets** alongside the H.264 video.
-- Because there are no separate audio playlists or elementary audio streams, standard web players (`hls.js`, `video.js`) report `hls.audioTracks = []`. You cannot toggle audio tracks inside that single M3U8 file.
-
-#### 2. Multi-Source Language Switching (`s70` Polaris)
-- Server `s70` (Polaris) handles multi-audio by returning **distinct stream URLs for each language**:
-  ```json
-  [
-    { "label": "Polaris — English 1080p", "url": "https://sacdn.hakunaymatata.com/.../master.m3u8" },
-    { "label": "Polaris — Hindi 1080p", "url": "https://sacdn.hakunaymatata.com/.../hindi_master.m3u8" },
-    { "label": "Polaris — Spanish 720p", "url": "https://sacdn.hakunaymatata.com/.../spanish.m3u8" },
-    { "label": "Polaris — Russian", "url": "https://sacdn.hakunaymatata.com/.../russian.m3u8" }
-  ]
-  ```
-- Audio switching is performed by switching the active stream URL rather than changing an internal HLS track.
-
-#### 3. True Master HLS Playlists with Multi-Audio Tracks
-- Select Polaris streams (HLS v7) include full `#EXT-X-MEDIA:TYPE=AUDIO` definitions:
-  ```m3u8
-  #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-aacl-128",NAME="English",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE="en",URI="v3.m3u8"
-  #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-aacl-128",NAME="Hindi",DEFAULT=NO,AUTOSELECT=YES,LANGUAGE="hi",URI="v4.m3u8"
-  ```
-- In these streams, `hls.js` fires `Hls.Events.AUDIO_TRACKS_UPDATED`, enabling instant in-stream language switching without re-buffering the video.
-
-#### 4. Dedicated Languages Endpoint (`/api/languages/`)
-- Querying the dedicated language directory endpoint returns additional localized streams:
-  ```http
-  GET https://api.bingr.one/api/languages/movie/1108427?title=Kill&year=2024 HTTP/1.1
-  Host: api.bingr.one
-  Origin: https://bingr.one
-  Referer: https://bingr.one/watch/movie/1108427
-  ```
-
----
-
-### Universal Multi-Audio Solution for Web Players
-
-To support all sources seamlessly, CineStream (`bingr-player`) implements a **Dual-Layer Audio Selector**:
-
-```javascript
-// Layer 1: Listen for internal HLS multi-audio tracks
-hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
-  if (data.audioTracks && data.audioTracks.length > 1) {
-    // Populate dropdown with internal tracks: English, Hindi, etc.
-    populateInternalAudioTracks(data.audioTracks);
-  }
-});
-
-// Layer 2: Fallback to Multi-Source Language Switching
-function handleSources(sources) {
-  const languageSources = sources.filter(s => s.language || s.label.includes('—'));
-  if (languageSources.length > 1) {
-    // Populate dropdown with server language streams
-    populateStreamLanguageSelector(languageSources);
-  }
-}
-```
-
----
-
----
-
-## 9. Subtitle Catching & Extraction Architecture
-
-Subtitles are sourced through the dedicated high-availability VDRK subtitle cluster (`sub.vdrk.site` / `cache.vdrk.site`) with dual-path resolution.
-
-### Primary Path: Direct Open-CORS VDRK Subtitle Cluster
-
-Direct client requests can query the VDRK edge cluster without going through the Bingr API proxy:
-
-```http
-# Movies:
-GET https://sub.vdrk.site/v1/movie/{tmdbId} HTTP/1.1
-
-# TV Series Episodes:
-GET https://sub.vdrk.site/v1/tv/{tmdbId}/{season}/{episode} HTTP/1.1
-```
-
-- **CORS Status**: `Access-Control-Allow-Origin: *`
-- **Output**: Array of `{ label: string, file: string }` containing direct `.vtt` WebVTT links.
-
----
-
-### Secondary Path: Bingr API Subtitle Proxy (Fallback)
-
-```http
-GET https://api.bingr.one/api/subtitles/vdrk/{type}/{tmdbId}?season={season}&ep={episode} HTTP/1.1
-Host: api.bingr.one
-Origin: https://bingr.one
-Referer: https://bingr.one/watch/{type}/{tmdbId}
-```
-
-- **Path Parameters**:
-  - `type`: `movie` or `tv`
-  - `tmdbId`: Standard TMDB numeric identifier (e.g. `1108427`, `1396`)
-- **Query Parameters (TV series only)**:
-  - `season`: Season number (e.g. `1`)
-  - `ep`: Episode number (e.g. `1`)
-
-### Subtitle Response Schema
-
-```json
-{
-  "subtitles": [
-    {
-      "id": "vdrk-1396-16",
-      "url": "https://cache.vdrk.site/v1/vtt/tv/1396/1/1/English.vtt",
-      "lang": "en",
-      "label": "English",
-      "source": "vdrk"
-    },
-    {
-      "id": "vdrk-1396-17",
-      "url": "https://cache.vdrk.site/v1/vtt/tv/1396/1/1/Spanish.vtt",
-      "lang": "es",
-      "label": "Spanish",
-      "source": "vdrk"
-    },
-    {
-      "id": "vdrk-1396-18",
-      "url": "https://cache.vdrk.site/v1/vtt/tv/1396/1/1/French.vtt",
-      "lang": "fr",
-      "label": "French",
-      "source": "vdrk"
-    }
-  ]
-}
-```
-
-### Key Technical Properties of Subtitles
-
-1. **Pure WebVTT (`.vtt`) Standards**: All subtitle tracks are delivered in UTF-8 formatted `text/vtt`.
-2. **Open CORS (`Access-Control-Allow-Origin: *`)**: The edge CDN (`cache.vdrk.site`) sends permissive CORS headers. Web browsers can fetch and render these tracks directly from client-side JavaScript without proxying.
-3. **Massive Multilingual Catalog**:
-   - Movies typically provide English and primary regional dubs.
-   - Popular TV shows provide **85+ language tracks** (Arabic, Bulgarian, Czech, Dutch, French, German, Hebrew, Italian, Korean, Polish, Spanish, Turkish, etc.).
-4. **Auto-Catching & Merging**: In our updated `scraper.js`, if a stream extraction returns 0 or 1 subtitle, the scraper automatically queries the VDRK subtitle cluster and merges the complete multi-language track list.
-
----
-
-## 10. Migration & Upgrade Guide (For Existing Integrations)
-
-> 📘 **Looking for a standalone migration manual?** Check the dedicated [UPGRADE_GUIDE.md](file:///c:/Users/HP/Pictures/Screenshots/ANIM/bingr-m3u8-scraper/UPGRADE_GUIDE.md) for quick copy-paste snippets.
-
-If you previously integrated an older version of our scraper that only extracted a single M3U8 stream without 4K, subtitles, or dub audio support, follow this guide to upgrade your project in minutes.
-
-### What Changed? (Before vs After)
-
-| Feature | Old Integration | Upgraded Integration |
-| :--- | :--- | :--- |
-| **Top Video Quality** | 720p / 1080p max (`s62`, `s40`) | **True 4K UHD (3840×2160)** & 1080p (`s4k` PeakStorm) |
-| **Subtitle Catching** | Empty array `subtitles: []` | Populated array with 1–89+ WebVTT subtitle URLs (Direct VDRK) |
-| **Audio Dubs** | Single pre-muxed audio only | Dual-Layer: HLS tracks + multi-stream language selector |
-| **Server Priority** | `s62` (Bastion 720p) first | `s4k` (4K) → `s70` (Dubs) → `s40` (1080p) → `s62` (720p) |
-| **Video Player** | Basic HLS play without `<track>` | Full closed-captions toggle & language switcher |
-| **CORS Compatibility** | Native video only | `crossorigin="anonymous"` for remote `.vtt` tracks |
-
----
-
-### Troubleshooting: Why Multi-Audio & Subtitles Are "Not Listing" or "Not Working"
-
-Many website owners report that multi-audio or subtitles fail to show up in their players. Below are the **exact technical root causes** and **guaranteed solutions**:
-
-#### 1. Subtitles Fail to Render or Are Silently Blocked
-* **Root Cause**: The HTML5 `<video>` tag is missing the `crossorigin="anonymous"` attribute.
-  Browsers enforce strict CORS security on WebVTT files. Even if the subtitle CDN sends open CORS headers (`Access-Control-Allow-Origin: *`), the browser blocks text tracks unless the `<video>` element explicitly declares `crossorigin="anonymous"`.
-* **Fix**:
-  ```html
-  <video id="myPlayer" controls playsinline crossorigin="anonymous"></video>
-  ```
-
-#### 2. Subtitles Array is Empty (`subtitles: []`)
-* **Root Cause**: Older scraper versions only called `POST /api/stream` and never queried the subtitle service.
-* **Fix**: The upgraded scraper automatically queries the **Direct VDRK Cluster** (`https://sub.vdrk.site/v1/{type}/{id}`) and merges the complete multi-language track list before returning results.
-
-#### 3. Multi-Audio Selector Stays Empty (`hls.audioTracks.length === 0`)
-* **Root Cause**:
-  In default 720p streams (`s62` Bastion), audio is **pre-multiplexed inside the MPEG-TS packets**. There are no separate `#EXT-X-MEDIA:TYPE=AUDIO` tags inside the M3U8 manifest. Thus, web players report zero audio tracks.
-* **Fix**:
-  1. Priority order now places `s4k` and `s70` ahead of `s62`. Server `s70` (Polaris) provides dedicated multi-language streams (English, Hindi, Spanish, Russian, etc.) and HLS v7 master manifests with internal audio tracks.
-  2. Implement the **Dual-Layer Audio Pattern**: Listen to `hls.on(Hls.Events.AUDIO_TRACKS_UPDATED)` for in-manifest tracks, and fall back to switching the active stream URL from the scraper's `sources` array for stream-level language dubs.
-
----
-
-### Step 1: Upgrading Your Scraper Backend
-
-#### If using `scraper.js` directly:
-Replace your local `scraper.js` with the updated version. The `scrapeMovie` and `scrapeTvEpisode` functions now automatically include the `subtitles` array:
-
-```javascript
-// BEFORE (old payload)
-const result = await scraper.scrapeMovie(1108427);
-console.log(result.primaryM3u8); // Only had video URL
-
-// AFTER (upgraded payload)
-const result = await scraper.scrapeMovie(1108427);
-console.log(result.primaryM3u8); // Stream M3U8 URL
-console.log(result.subtitles);   // Array of { id, url, lang, label }
-console.log(result.sources);     // Multi-language stream options (English, Hindi, etc.)
-```
-
-#### If using custom HTTP requests (Python, PHP, Go):
-Add a parallel call to fetch subtitles:
-```http
-GET https://api.bingr.one/api/subtitles/vdrk/{type}/{id}?season={season}&ep={episode}
-Referer: https://bingr.one/watch/{type}/{id}
-Origin: https://bingr.one
-```
-
----
-
-### Step 2: Upgrading Your Web Player (Frontend)
-
-To render the captured subtitles and switch dub languages in your player:
-
-#### A. Add `crossorigin="anonymous"` to your `<video>` tag
-> ⚠️ **CRITICAL**: Without `crossorigin="anonymous"`, web browsers block remote WebVTT subtitle tracks due to CORS security rules.
-
-```html
-<!-- BEFORE -->
-<video id="myPlayer" controls></video>
-
-<!-- AFTER -->
-<video id="myPlayer" controls playsinline crossorigin="anonymous"></video>
-```
-
-#### B. Add Subtitle & Audio Selectors to your HTML toolbar
-```html
-<!-- Subtitle Selector Dropdown -->
-<select id="subtitleSelect" onchange="switchSubtitle(this.value)">
-  <option value="off">Subtitles: Off</option>
-</select>
-
-<!-- Audio Language Selector Dropdown -->
-<select id="audioSelect" onchange="switchAudio(this.value)">
-  <option value="-1">Audio: Default</option>
-</select>
-```
-
-#### C. Drop-in Player Upgrade Script (JavaScript)
-
-Replace your existing video playback function with this universal implementation:
-
-```javascript
-let hls = null;
-let currentSources = [];
-let currentSubtitles = [];
-
-function loadStreamWithAudioAndSubtitles(sources, subtitles) {
-  const video = document.getElementById('myPlayer');
-  currentSources = sources;
-  currentSubtitles = subtitles || [];
-
-  // 1. INJECT SUBTITLES AS <track> ELEMENTS
-  // Remove existing tracks
-  video.querySelectorAll('track').forEach(t => t.remove());
-
-  const subSelect = document.getElementById('subtitleSelect');
-  subSelect.innerHTML = '<option value="off">Subtitles: Off</option>';
-
-  if (currentSubtitles.length > 0) {
-    subSelect.style.display = 'inline-block';
-    currentSubtitles.forEach((sub, idx) => {
-      // Create HTML5 track
-      const track = document.createElement('track');
-      track.kind = 'subtitles';
-      track.label = sub.label || sub.lang;
-      track.srclang = sub.lang || 'en';
-      track.src = sub.url;
-      video.appendChild(track);
-
-      // Add to UI dropdown
-      const opt = document.createElement('option');
-      opt.value = idx;
-      opt.innerText = `CC: ${sub.label || sub.lang}`;
-      subSelect.appendChild(opt);
-    });
-  } else {
-    subSelect.style.display = 'none';
-  }
-
-  // 2. POPULATE DUB LANGUAGE SELECTOR
-  const audioSelect = document.getElementById('audioSelect');
-  audioSelect.innerHTML = '<option value="-1">Audio: Default</option>';
-
-  // Check if scraper returned multi-language stream alternatives (e.g. Polaris)
-  const languageStreams = sources.filter(s => s.language || s.label?.includes('—'));
-  if (languageStreams.length > 1) {
-    audioSelect.style.display = 'inline-block';
-    languageStreams.forEach((src, idx) => {
-      const opt = document.createElement('option');
-      opt.value = `src_${idx}`;
-      opt.innerText = `Audio: ${src.label || src.language}`;
-      audioSelect.appendChild(opt);
-    });
-  }
-
-  // 3. INITIALIZE HLS.JS
-  const primaryUrl = sources[0].url;
-  if (hls) hls.destroy();
-
-  if (Hls.isSupported()) {
-    hls = new Hls();
-    hls.loadSource(primaryUrl);
-    hls.attachMedia(video);
-
-    // Layer 1: Listen for in-manifest HLS audio tracks (HLS v7 master playlists)
-    hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
-      if (data.audioTracks && data.audioTracks.length > 1) {
-        audioSelect.style.display = 'inline-block';
-        audioSelect.innerHTML = '';
-        data.audioTracks.forEach((track, idx) => {
-          const opt = document.createElement('option');
-          opt.value = `hls_${idx}`;
-          opt.innerText = `Audio: ${track.name || track.lang || `Track ${idx + 1}`}`;
-          audioSelect.appendChild(opt);
-        });
-      }
-    });
-  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = primaryUrl;
-  }
-}
-
-// 4. SUBTITLE SWITCHING FUNCTION
-function switchSubtitle(trackIdx) {
-  const video = document.getElementById('myPlayer');
-  for (let i = 0; i < video.textTracks.length; i++) {
-    if (trackIdx === 'off') {
-      video.textTracks[i].mode = 'disabled';
-    } else {
-      video.textTracks[i].mode = (i === parseInt(trackIdx)) ? 'showing' : 'disabled';
-    }
-  }
-}
-
-// 5. AUDIO LANGUAGE SWITCHING FUNCTION
-function switchAudio(val) {
-  if (val.startsWith('hls_')) {
-    // In-stream HLS track switch (instant, no re-buffering)
-    const idx = parseInt(val.replace('hls_', ''));
-    if (hls) hls.audioTrack = idx;
-  } else if (val.startsWith('src_')) {
-    // Multi-source stream switch (loads alternate language M3U8)
-    const idx = parseInt(val.replace('src_', ''));
-    const chosen = currentSources[idx];
-    if (chosen && hls) {
-      hls.loadSource(chosen.url);
-      hls.attachMedia(document.getElementById('myPlayer'));
+## 4. Anime Metadata & Episode Indexing
+
+Anime identification is unified via **AniList ID** and **MyAnimeList (MAL) ID**.
+
+### 1. AniList GraphQL Search (`https://graphql.anilist.co`)
+Allows fuzzy searching by English, Romaji, and native Japanese titles:
+```graphql
+query ($search: String) {
+  Page(page: 1, perPage: 15) {
+    media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+      id
+      idMal
+      title { romaji english native }
+      episodes
+      bannerImage
+      coverImage { large extraLarge }
+      description
+      genres
+      seasonYear
+      status
+      averageScore
     }
   }
 }
 ```
 
----
-
-### Step 3: Mandatory Requirement: Scraper / Server Selection in Video Players
-
-When integrating video playback in scripts like `play.php` or custom frontend video embeds, **you MUST provide a visible Scraper / Server Selection Option** (e.g., `<select name="srv">`).
-
-#### Why Hardcoding a Single Scraper Server is Forbidden:
-
-1. **ISP & DNS Blocking**: Default server `s62` (Bastion) relies on domains like `nxocw.com` and `knocw.com`. Many regional ISPs (e.g. Reliance Jio, Airtel, Turkish/European ISPs) block these domains. Switching to `s70` (Polaris on Cloudflare `hakunaymatata.com`) or `s40` (DarkMatter on `streamrip.fun`) immediately bypasses ISP blocks without needing a VPN.
-2. **Audio Dub & Language Availability**: Server `s62` serves pre-muxed single-audio streams. If a viewer wants to watch in English, Spanish, Russian, Kurdish, or Arabic, switching to server `s70` (Polaris) provides dedicated multi-language stream tracks.
-3. **Bitrate and Resolution Options**: Server `s40` (DarkMatter) provides high-bitrate 1080p StreamRip encodes, while server `s62` (Bastion) provides lightweight 720p/480p adaptive bitrate streams for mobile devices.
-4. **Resilience Against Outages**: If any scraper cluster is temporarily rate-limited or undergoes scheduled maintenance, allowing the user to switch scrapers guarantees zero downtime.
-
-#### Server Directory Reference:
-```html
-<select id="srvSelect" onchange="switchScraperServer(this.value)">
-  <option value="s4k">PeakStorm 4K (SpeedRace 4K UHD & 1080p Direct)</option>
-  <option value="s70">Polaris (Multi-Language Dubs / HLS v7)</option>
-  <option value="s40">DarkMatter (StreamRip 1080p Direct)</option>
-  <option value="s62">Bastion (KNOCW / NXOCW CDN)</option>
-  <option value="s3">Edmunds (Filmu Proxy)</option>
-  <option value="s60">Vertex (Alternate)</option>
-  <option value="s61">Corvus</option>
-  <option value="s30">Nova</option>
-  <option value="s31">Orion</option>
-</select>
-```
-
----
-
-### Step 4: Adding Floating "Skip Intro" & "Next Episode" to Existing Web Players
-
-To match modern streaming platforms (Netflix, Crunchyroll, VidLink, Boomflix), existing web player embeds can add one-click Skip Intro and Next Episode buttons:
-
-#### A. Video Container Markup
-```html
-<div class="player-container" style="position: relative; max-width: 100%;">
-  <video id="myPlayer" controls playsinline crossorigin="anonymous" style="width: 100%;"></video>
-
-  <!-- Floating Skip Intro Button -->
-  <button id="skipIntroBtn" onclick="skipIntro()" style="display:none; position:absolute; bottom:65px; right:20px; z-index:40; background:rgba(99,102,241,0.95); color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.5); font-family:sans-serif;">
-    ⏭️ Skip Intro
-  </button>
-
-  <!-- Floating Next Episode Button -->
-  <button id="nextEpBtn" onclick="playNextEpisode()" style="display:none; position:absolute; bottom:65px; right:20px; z-index:40; background:rgba(16,185,129,0.95); color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.5); font-family:sans-serif;">
-    ⏭️ Next Episode
-  </button>
-</div>
-```
-
-#### B. JavaScript Timing & Skip Controller
-```javascript
-let hasSkippedIntro = false;
-let introStart = 15; // Set dynamically from AniSkip or fallback to 15s
-let introEnd = 95;   // Set dynamically from AniSkip or fallback to 95s
-
-const video = document.getElementById('myPlayer');
-const skipBtn = document.getElementById('skipIntroBtn');
-const nextBtn = document.getElementById('nextEpBtn');
-
-// Monitor playback time
-video.addEventListener('timeupdate', () => {
-  const cur = video.currentTime;
-
-  // Show Skip Intro during opening sequence
-  if (!hasSkippedIntro && cur >= introStart && cur <= introEnd) {
-    skipBtn.style.display = 'block';
-  } else {
-    skipBtn.style.display = 'none';
-  }
-
-  // Show Next Episode when remaining time < 120s
-  if (video.duration && (video.duration - cur <= 120)) {
-    nextBtn.style.display = 'block';
-  } else {
-    nextBtn.style.display = 'none';
-  }
-});
-
-// Jump past intro sequence
-function skipIntro() {
-  hasSkippedIntro = true;
-  video.currentTime = introEnd;
-  skipBtn.style.display = 'none';
-}
-```
-
----
-
-## 11. Skip Intro & Outro Architecture (AniSkip & Heuristic Timing)
-
-Modern video streaming portals (e.g., Netflix, Crunchyroll, VidLink, Boomflix) allow viewers to seamlessly skip show opening sequences ("Skip Intro") and jump to subsequent episodes when closing credits roll ("Skip Outro / Next Episode").
-
-### The Architectural Problem:
-Standard HLS (`.m3u8`) and MPEG-TS manifests do not embed chapter markers, opening timestamps, or intro start/end boundaries. Therefore, **"Skip Intro" is implemented client-side** by cross-referencing playback time (`video.currentTime`) against an external timing provider or heuristic calculation.
-
-### 1. AniSkip Integration (Anime & Asian Animation)
-For anime, the engine integrates directly with the **AniSkip Open API** (`api.aniskip.com`), which maintains community-verified millisecond timestamps for openings (`op`) and endings (`ed`).
-
-#### Endpoint Specification:
+### 2. Paginated Episode Chunks (`/api/anime/:id/episodes`)
+For long-running series (e.g. *One Piece* with 1100+ episodes), episode metadata is fetched in 100-episode chunks:
 ```http
-GET https://api.aniskip.com/v2/skip-times/{malId}/{episode}?types[]=op&types[]=ed&episodeLength=0 HTTP/1.1
-Host: api.aniskip.com
-Accept: application/json
+GET https://api.bingr.one/api/anime/21/episodes?chunk=0
+```
+Each episode entry includes:
+- `episode`: Episode index number (1, 2, 3...)
+- `title`: Translated episode title
+- `still`: Episode thumbnail image URL
+- `air_date`: Original broadcast date
+- `overview`: Plot summary
+
+---
+
+## 5. Fallback Architecture: AnimeSalt Multi-Audio Engine
+
+If the primary `Ryuu` resolver yields 0 sources for an obscure or unindexed episode, the scraper automatically falls back to **AnimeSalt**:
+```http
+GET https://hianime.filmu.in/animesalt/streams?title=:encodedTitle&ep=:ep&season=1
+Headers:
+  x-api-key: <token>
+```
+* **Provider**: Scrapes **Mikazuki** and multi-audio archives.
+* **Output**: Returns fallback HLS streams and direct MP4 mirrors with embedded language tags.
+
+---
+
+## 6. AniSkip Automated Skip Intro & Outro Architecture
+
+Anime series consistently contain Opening (`OP`) and Ending (`ED`) theme songs. The scraper integrates directly with **AniSkip** (`https://api.aniskip.com`), an open timestamp database keyed by **MyAnimeList (MAL) ID**.
+
+### API Query:
+```http
+GET https://api.aniskip.com/v2/skip-times/:idMal/:episode?types[]=op&types[]=ed&episodeLength=0
 ```
 
-#### JSON Response Schema:
+### Example Live Response (One Piece Ep 1000, MAL ID: 21):
 ```json
 {
   "found": true,
   "results": [
     {
       "interval": {
-        "startTime": 513.2,
-        "endTime": 603.2
+        "startTime": 13.891,
+        "endTime": 123.834
       },
       "skipType": "op",
-      "skipId": "b8f590...",
-      "episodeLength": 1420.0
-    },
-    {
-      "interval": {
-        "startTime": 1330.0,
-        "endTime": 1420.0
-      },
-      "skipType": "ed",
-      "skipId": "a9c144..."
+      "skipId": "5bcf9262-b16f-40ad-9d12-8168e4ecad2d",
+      "episodeLength": 1430.721
     }
-  ]
+  ],
+  "statusCode": 200
 }
 ```
 
-### 2. Universal Heuristic Fallback (Western TV Series)
-Broadcast and streaming Western TV series adhere to standard pacing conventions:
-- **Cold Open**: Typically 10 to 30 seconds before the title sequence.
-- **Intro Title Sequence**: 45 to 80 seconds in duration.
-- **Intro End**: Concludes by second 85 to 95 of playback.
-
-When no third-party database record is returned, the engine implements a **smart heuristic timing window**:
-- **Start**: `15.0s`
-- **End**: `95.0s`
-- **Skip Delta**: Jump forward `+80s` directly to the start of Act I.
-- **Outro Detection**: Automatically offers "Next Episode" when remaining duration is under 120 seconds (`video.currentTime >= video.duration - 120`).
-
-### 3. Engine API Implementation (`scraper.js`)
-The Node.js engine provides `getSkipTimes()`:
+### Timestamp Normalization:
+The scraper normalizes intervals into structured objects:
 ```javascript
-const { getSkipTimes } = require('./scraper');
-
-// Query skip points for anime or TV
-const times = await getSkipTimes(1735, 1);
-if (times.hasOp) {
-  console.log(`Skip Intro Available: ${times.op.start}s -> ${times.op.end}s (+${times.op.skipDuration}s)`);
+{
+  start: 13.891,
+  end: 123.834,
+  startFormatted: "00:13",
+  endFormatted: "02:03",
+  type: "op",
+  label: "Skip Intro"
 }
 ```
 
-CLI inspection tool:
-```bash
-node cli.js skip 1735 1
-# Output: [AniSkip] Found Opening (op): 513s -> 603s (Skip: +90s)
+---
+
+## 7. Subtitle Extraction & WebVTT Handling
+
+Servers `yuki` and `zuna` return multi-language WebVTT subtitle tracks.
+
+### WebVTT Data Model:
+```json
+{
+  "lang": "en",
+  "label": "English",
+  "url": "https://fetch.nexabloom.top/anime/.../subtitles/english.vtt",
+  "proxyUrl": "https://hianime.filmu.in/proxy/subtitle?url=...&referer=https%3A%2F%2Fmegaplay.buzz%2F"
+}
 ```
+* **CORS Proxying**: Subtitles hosted on protected origins are automatically routed via the pre-built `proxyUrl` to prevent browser CORS security rejections.
+* **Video Tag Injection**: Subtitles should always be injected into HTML5 video elements with `crossorigin="anonymous"`.
 
-### 4. Client-Side Player Integration (HTML5 & Hls.js)
-To add interactive floating buttons to any video player:
+---
 
-```html
-<div class="video-container" style="position: relative; max-width: 100%;">
-  <video id="myPlayer" controls playsinline crossorigin="anonymous"></video>
+## 8. Player Integration & Dynamic Skip Event Lifecycle
 
-  <!-- Floating Skip Intro Button -->
-  <button id="skipIntroBtn" onclick="skipIntro()" style="display:none; position:absolute; bottom:70px; right:25px; z-index:40; background:rgba(99,102,241,0.9); color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.5);">
-    ⏭️ Skip Intro
-  </button>
+During HTML5 video playback, a listener checks the video element's `currentTime` on every `timeupdate` tick:
 
-  <!-- Floating Next Episode Button -->
-  <button id="nextEpBtn" onclick="playNextEpisode()" style="display:none; position:absolute; bottom:70px; right:25px; z-index:40; background:rgba(16,185,129,0.9); color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.5);">
-    ⏭️ Next Episode
-  </button>
-</div>
-
-<script>
-let hasSkippedIntro = false;
-const introStart = 15; // or times.op.start
-const introEnd = 95;   // or times.op.end
-
-const video = document.getElementById('myPlayer');
-const skipBtn = document.getElementById('skipIntroBtn');
-
+```javascript
 video.addEventListener('timeupdate', () => {
   const cur = video.currentTime;
-  
-  // Show Skip Intro during intro interval
-  if (!hasSkippedIntro && cur >= introStart && cur <= introEnd) {
-    skipBtn.style.display = 'block';
-  } else {
-    skipBtn.style.display = 'none';
-  }
 
-  // Show Next Episode when outro starts or remaining time < 2 mins
-  const nextBtn = document.getElementById('nextEpBtn');
-  if (video.duration && (video.duration - cur <= 120)) {
-    nextBtn.style.display = 'block';
+  // Check if current time falls within any AniSkip interval
+  const active = skipIntervals.find(i => cur >= i.start && cur <= i.end && !dismissed.has(i.start));
+
+  if (active) {
+    skipBtn.innerText = `⏩ ${active.label} (${active.startFormatted} ➔ ${active.endFormatted})`;
+    skipBtn.onclick = () => {
+      dismissed.add(active.start);
+      video.currentTime = active.end; // Jump straight past the OP/ED
+      skipBtn.classList.add('hidden');
+    };
+    skipBtn.classList.remove('hidden');
   } else {
-    nextBtn.style.display = 'none';
+    skipBtn.classList.add('hidden');
   }
 });
-
-function skipIntro() {
-  hasSkippedIntro = true;
-  video.currentTime = introEnd;
-  skipBtn.style.display = 'none';
-}
-</script>
 ```
 
 ---
 
-## 12. Multi-Language Implementation Reference
+## 9. REST Microservice API Specification
 
-### A. Node.js Native
-```javascript
-const scraper = require('./scraper');
+The microservice (`server.js`) exposes dedicated anime endpoints:
 
-// Scrape Movie with Subtitles & Sources
-const movie = await scraper.scrapeMovie(1108427);
-console.log('M3U8:', movie.primaryM3u8);
-console.log('Subtitles Count:', movie.subtitles.length);
+### 1. `GET /api/anime/search?q={query}`
+Searches anime across AniList and returns titles, cover posters, MAL IDs, episode counts, and ratings.
 
-// Scrape TV Series Episode with Subtitles
-const episode = await scraper.scrapeTvEpisode(1396, 1, 1);
-console.log('Episode M3U8:', episode.primaryM3u8);
-console.log('Episode Subtitles:', episode.subtitles.length);
+### 2. `GET /api/anime/:id`
+Returns complete anime metadata, backdrop, synopsis, and `idMal`.
 
-// Direct Subtitles Catching
-const subs = await scraper.getSubtitles('tv', 1396, 1, 1);
-console.log('Found Languages:', subs.map(s => s.label));
-```
+### 3. `GET /api/anime/:id/episodes?chunk={chunk}`
+Returns paginated episodes (chunk 0 = episodes 1–100, chunk 1 = 101–200, etc.).
 
-### B. Python 3 (`requests`)
-```python
-import requests
+### 4. `GET /api/anime/:id/:episode/streams?type=sub|dub&race=1`
+Extracts direct `.m3u8` links from all 5 servers (`beep`, `yuki`, `neko`, `zuna`, `loli`).
+* Query parameter `race=1` runs an immediate latency probe and returns the fastest live server.
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-    'Referer': 'https://bingr.one/watch/movie/1108427',
-    'Origin': 'https://bingr.one'
-}
+### 5. `GET /api/anime/skip/:idMal/:episode`
+Fetches OP and ED skip timestamps from the AniSkip database.
 
-# 1. Scrape Stream
-stream_res = requests.post(
-    "https://api.bingr.one/api/stream",
-    json={"srv": "s62", "t": "movie", "id": 1108427, "query": {"title": "Kill", "year": "2024"}},
-    headers=HEADERS
-)
-stream_data = stream_res.json()
-print("M3U8 URL:", stream_data["sources"][0]["url"])
+### 6. `GET /test` or `GET /ui`
+Serves the interactive HTML5 test bench and live video player dashboard.
 
-# 2. Catch Subtitles
-sub_res = requests.get("https://api.bingr.one/api/subtitles/vdrk/movie/1108427", headers=HEADERS)
-sub_data = sub_res.json()
-print("Found Subtitles:", len(sub_data.get("subtitles", [])))
-```
+---
 
-### C. Raw cURL
+## 10. Command-Line Interface (`anime_cli.js`)
+
+A standalone CLI tool is provided for terminal testing and script automation:
+
 ```bash
-# Scrape Stream
-curl -X POST "https://api.bingr.one/api/stream" \
-  -H "Origin: https://bingr.one" \
-  -H "Referer: https://bingr.one/watch/movie/1108427" \
-  -H "Content-Type: application/json" \
-  -d '{"srv":"s62","t":"movie","id":1108427,"query":{"title":"Kill","year":"2024"}}'
+# 1. Basic search and stream resolution
+node anime_cli.js "One Piece" 1000
 
-# Catch Subtitles
-curl -X GET "https://api.bingr.one/api/subtitles/vdrk/movie/1108427" \
-  -H "Origin: https://bingr.one" \
-  -H "Referer: https://bingr.one/watch/movie/1108427"
+# 2. Extract Dubbed audio with server latency race
+node anime_cli.js "Demon Slayer" 1 --type dub --race
+
+# 3. Lookup directly by AniList ID
+node anime_cli.js 21 1000
+
+# 4. Pure JSON output for piping into jq / external scripts
+node anime_cli.js "Jujutsu Kaisen" 1 --json
 ```
-
-### D. PHP Native Implementation (`play.php`)
-
-A full, production-ready standalone PHP video player is available at [`play.php`](file:///c:/Users/HP/Pictures/Screenshots/ANIM/bingr-m3u8-scraper/play.php).
-
-#### How `play.php` Works:
-1. Accepts query parameters:
-   - `play.php?tmdb=1108427&srv=s62` (Movie on Bastion)
-   - `play.php?tmdb=1108427&srv=s70` (Movie on Polaris with multi-language dubs)
-   - `play.php?tmdb=1396&type=tv&season=1&ep=1` (TV Episode)
-2. Uses native PHP `curl` to query the selected scraper server (`/api/stream`) with bypass headers.
-3. Automatically catches multi-language WebVTT subtitles via `/api/subtitles/vdrk/{type}/{id}`.
-4. Renders a UI with:
-   - **Scraper / Server Selector dropdown** that re-requests streams from alternate clusters if one is blocked or failing.
-   - **Audio / Dub Language Selector** (switching between English, Hindi, Spanish, etc.).
-   - **Subtitle Selector** injecting HTML5 `<track>` tags with `crossorigin="anonymous"`.
-   - **Quality Selector** powered by HLS.js.
 
 ---
 
-## 13. Agentic Guidelines & Maintenance Rules
+## 11. Speed Race & Latency Optimization
 
-When configuring, enhancing, or wrapping this scraper in subagents or automation:
+Because anime video CDNs vary in regional peering, the engine provides an automated **Speed Race** routine (`speedRaceAnimeServers`):
+1. Dispatches concurrent HTTP `HEAD` / lightweight `GET` probes across all 5 servers.
+2. Verifies the presence of the `#EXTM3U` header.
+3. Ranks servers by response latency in milliseconds.
+4. Player automatically binds to the lowest-latency live server.
 
-1. **Always Set Referer & Origin**: Never omit `https://bingr.one` headers when communicating with `api.bingr.one`.
-2. **Handle Expiration Tokens**: Scraped M3U8 links contain `expire=<timestamp>`. Cached URLs should be renewed if older than 2–4 hours.
-3. **Preserve MPEG-TS MIME Types**: When serving or proxying `.m3u8` playlists, set `Content-Type: application/vnd.apple.mpegurl`.
-4. **Never Proxy Video Chunks**: Stream segments directly to client browsers to save server compute and bandwidth since origin CDNs provide `Access-Control-Allow-Origin: *`.
-5. **Always Set `crossorigin="anonymous"` for Subtitles**: Web browsers require this tag on `<video>` elements to render third-party WebVTT captions without CORS failures.
-6. **Multi-Audio Handling**: Use the dual-layer approach: check `hls.audioTracks` first; if empty, expose stream switching across `sources` with distinct language labels.
-7. **Mandatory Scraper Selection in Players**: Any video player implementation (such as `play.php`, embed pages, or wrapper applications) **MUST** expose a scraper server selection control. Never hardcode a single server cluster.
+---
 
+## 12. Agentic Guidelines & Operational Maintenance Rules
 
+When extending or automating this anime scraper engine:
 
+1. **Strict Anime Scope**: Do not conflate this engine with general movie/TV TMDB scrapers. Keep anime resolution isolated to AniList, MyAnimeList, and the 5 anime servers.
+2. **Always Pair AniList with MAL**: AniSkip requires the MyAnimeList ID (`idMal`). When fetching AniList metadata, always store and propagate `idMal`.
+3. **Session Token Expiration**: The Ryuu JWT token expires every 2.5 hours. Always use `getAnimeToken()` which auto-refreshes expired tokens.
+4. **Header Integrity**: When playing direct streams outside the built-in proxy, preserve `Referer` headers (`https://playeng.animeapps.top/` for `beep`, `https://megaplay.buzz/` for `yuki`, `https://bibiemb.xyz` for `neko`, `https://zokoanime.video/` for `zuna`).
+5. **Multi-Server Fallback**: Never assume a single server is permanently active. Always render the 5-server switcher in player interfaces.

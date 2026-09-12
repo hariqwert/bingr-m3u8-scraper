@@ -1,124 +1,104 @@
-# 🎬 Bingr M3U8 HLS Stream Scraper
+# ⚡ Anime M3U8 HLS Stream Scraper Engine
 
-A high-speed, reverse-engineered scraper and microservice for extracting live **M3U8 HLS video streams** for any **Movie** or **TV Series (by Season & Episode)** using standard TMDB IDs.
+A high-speed, zero-dependency scraper, microservice, and interactive player bench exclusively for extracting live **Anime M3U8 HLS video streams** across **5 specialized server clusters** (`beep`, `yuki`, `neko`, `zuna`, `loli`) with automated **AniSkip Skip Intro / Outro** integration.
 
 ---
 
-## ⚡ Highlights
+## 🌟 Features
 
-- **Zero API Keys Required**: Automatically extracts streams without paid keys.
-- **Movies & TV Shows**: Supports single movies and multi-season TV episodes.
-- **Auto Subtitle Catching**: Automatically extracts multi-language **WebVTT (`.vtt`) subtitles** across 85+ languages.
-- **Multi-Audio & Dub Switching**: Supports both HLS v7 master playlist audio tracks and multi-language server streams (English, Hindi, Spanish, Russian, etc.).
-- **Live Sports Matches**: Scrapes live matches and sports HLS video streams (Willow Cricket, Fox Sports, etc.).
-- **Multi-Server Auto-Cascade**: Automatically tries `s62` (Bastion), `s40` (DarkMatter), `s70` (Polaris), `s3` (Edmunds).
-- **Multiple Interfaces**:
-  - Modular Node.js Library (`scraper.js`)
-  - Command Line Tool (`cli.js`)
-  - Standalone REST API Microservice (`server.js`)
-- **Zero External Dependencies**: Runs out of the box using Node.js standard libraries.
+- **5 Anime Server Clusters**:
+  - `beep`: AnimeApps / PlayEng CDN (cached direct `.m3u8`)
+  - `yuki`: MegaPlay / NexaBloom Master (tokenized master with global WebVTT)
+  - `neko`: BibiEmbed / Cloudflare Edge Workers
+  - `zuna`: AniWatch / ZokoAnime / HiAnime CDN
+  - `loli`: EchoVideo / AnimeWave mirror CDN
+- **Automated AniSkip OP/ED Skipping**: Fetches millisecond-accurate opening (`op`) and ending (`ed`) interval timestamps via `api.aniskip.com`.
+- **Anime Metadata & Chunked Episodes**: Seamless AniList GraphQL integration and 100-episode chunk pagination.
+- **Speed Race Latency Engine**: Races all 5 servers concurrently to identify and play the fastest operational CDN.
+- **Interactive Web Player & Test Bench**: Complete dark-theme web dashboard hosted on `http://localhost:5000/test` with Hls.js playback and floating Skip Intro button.
+- **Zero External Dependencies**: Pure Node.js standard libraries (`http`, `https`, `url`, `fs`).
 
 ---
 
 ## 🚀 Quickstart
 
-### 1. Command Line (CLI)
+### 1. Command Line Interface (CLI)
 ```bash
-# Search for Movies & TV Shows
-node cli.js search "Kill"
+# 1. Search and extract streams from all 5 servers
+node anime_cli.js "One Piece" 1000
 
-# Scrape Movie M3U8 & Subtitles (TMDB ID: 1108427)
-node cli.js movie 1108427
+# 2. Race latency and extract Dubbed streams
+node anime_cli.js "Demon Slayer" 1 --type dub --race
 
-# List Episodes in a TV Season (Breaking Bad S1)
-node cli.js episodes 1396 1
+# 3. Lookup directly by AniList ID
+node anime_cli.js 21 1000
 
-# Scrape Specific TV Episode (with 85+ subtitle tracks)
-node cli.js tv 1396 1 1
-
-# Catch Subtitles Directly
-node cli.js subtitles tv 1396 1 1
-
-# Live Sports
-node cli.js sports
-node cli.js sport-stream solaris 247-fox-footy
+# 4. Pure JSON output
+node anime_cli.js "Jujutsu Kaisen" 1 --json
 ```
 
-### 2. Programmatic Usage (Node.js)
-```javascript
-const scraper = require('./scraper');
+---
 
-// Scrape Movie (includes M3U8, subtitles array, and multi-language sources)
-const movie = await scraper.scrapeMovie(1108427);
-console.log('Stream URL:', movie.primaryM3u8);
-console.log('Subtitles:', movie.subtitles);
-
-// Scrape TV Series Episode
-const episode = await scraper.scrapeTvEpisode(1396, 1, 1);
-console.log('Episode Stream:', episode.primaryM3u8);
-console.log('Subtitles Count:', episode.subtitles.length);
-
-// Direct Subtitle Extraction
-const subs = await scraper.getSubtitles('tv', 1396, 1, 1);
-console.log('Available Subtitles:', subs.map(s => s.label));
-```
-
-### 3. REST API Microservice
+### 2. Interactive Web Player & Test Bench
+Start the microservice:
 ```bash
 node server.js
-# API running on http://localhost:5000
 ```
-- `GET /search?q=Kill`
-- `GET /movie/1108427/stream`
-- `GET /tv/1396/season/1`
-- `GET /tv/1396/season/1/episode/1/stream`
-- `GET /subtitles/tv/1396?season=1&ep=1`
-- `GET /sports/matches`
-- `GET /sports/stream/solaris/247-willow`
+Open your browser at:
+👉 **`http://localhost:5000/test`** (or `http://localhost:5000/`)
 
-### 4. Standalone PHP Video Player (`play.php`)
-Drop `play.php` onto any PHP-enabled server (Apache, Nginx, XAMPP):
-```bash
-# Play movie with default scraper (Bastion)
-http://localhost/play.php?tmdb=1108427
+* Search any anime title (*One Piece*, *Demon Slayer*, *Attack on Titan*, *Jujutsu Kaisen*).
+* Switch between `beep`, `yuki`, `neko`, `zuna`, and `loli` servers in real time.
+* Watch the floating **"Skip Intro"** / **"Skip Ending"** pill button appear dynamically during opening and ending themes!
 
-# Play movie with multi-language audio dubs (Polaris)
-http://localhost/play.php?tmdb=1108427&srv=s70
+---
 
-# Play TV episode with 85+ WebVTT subtitles
-http://localhost/play.php?tmdb=1396&type=tv&season=1&ep=1
+### 3. REST API Endpoints
+
+| Method | Route | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/anime/search?q={query}` | Fuzzy title search with MAL/AniList mapping |
+| `GET` | `/api/anime/:id` | Anime metadata details, synopsis, and MAL ID |
+| `GET` | `/api/anime/:id/episodes?chunk={chunk}` | Paginated episodes list (100 per chunk) |
+| `GET` | `/api/anime/:id/:episode/streams?type=sub\|dub&race=1` | Direct `.m3u8` links from all 5 servers |
+| `GET` | `/api/anime/skip/:idMal/:episode` | AniSkip OP/ED skip intervals |
+| `GET` | `/api/anime/servers` | Active anime cluster server directory |
+| `GET` | `/test` | Interactive Web Player & API Test Bench |
+
+---
+
+### 4. Programmatic Node.js Usage
+```javascript
+const {
+  searchAnime,
+  getAnimeDetails,
+  getAnimeStreams,
+  getSkipTimes,
+  speedRaceAnimeServers
+} = require('./animeScraper');
+
+// 1. Search
+const results = await searchAnime('One Piece');
+const top = results[0];
+
+// 2. Extract streams from beep, yuki, neko, zuna, loli + AniSkip
+const streamData = await getAnimeStreams({
+  anilistId: top.id,
+  episode: 1000,
+  type: 'sub',
+  idMal: top.idMal
+});
+
+console.log('Active Servers:', streamData.servers);
+console.log('Skip Timestamps:', streamData.skipTimes);
+
+// 3. Race latency across live servers
+const race = await speedRaceAnimeServers(streamData.sources);
+console.log('Fastest CDN:', race.fastest.server, `${race.fastest.latency}ms`);
 ```
-Includes built-in **Scraper / Server Selector**, **Audio Dub Switcher**, **Subtitle Track Selector**, and **Quality Picker**.
 
 ---
 
-## 🔄 Already Integrated the Old Scraper? (Upgrade Guide)
+## 📖 Architecture & Protocols
 
-If your existing application previously integrated our scraper without dub audio or subtitle support, follow our complete upgrade guide in **[AGENTS.md (Section 10)](AGENTS.md#10-migration--upgrade-guide-for-existing-integrations)**:
-
-1. **Add `crossorigin="anonymous"`** to your `<video>` tag so the browser permits cross-origin WebVTT captions.
-2. **Inject WebVTT `<track>` elements** directly from the returned `result.subtitles` array.
-3. **Toggle Subtitles** dynamically using `video.textTracks[i].mode = 'showing' | 'disabled'`.
-4. **Enable Dual-Layer Audio Switching** to support both internal HLS v7 tracks and multi-source regional streams.
-5. **Add Mandatory Scraper Selection**: In video players (like `play.php`), always allow users to switch scrapers (`s62`, `s70`, `s40`) to bypass ISP blocks and access alternate language dubs.
-
-👉 **[Read the Full Upgrade & Drop-in Player Code in AGENTS.md](AGENTS.md#10-migration--upgrade-guide-for-existing-integrations)**
-
----
-
-## 📖 Complete Technical Architecture & Specification
-
-Read **[AGENTS.md](AGENTS.md)** for full documentation on:
-- Network reverse-engineering and anti-bot bypass
-- Request/response schemas for movies, seasons, and episodes
-- Subtitle catching & WebVTT proxy infrastructure
-- Dual-layer multi-audio and language switching architecture
-- Live sports match scraping and direct HLS extraction
-- CDN segment masking (.jpg format delivering MPEG-TS packets)
-- Server cluster directory and fallback cascade algorithms
-- Python and cURL implementations
-
----
-
-## 📄 License
-MIT
+For full protocol details, token schemas, server origins, and player event lifecycles, see **[`AGENTS.md`](./AGENTS.md)**.

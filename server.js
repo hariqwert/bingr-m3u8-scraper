@@ -1,6 +1,8 @@
 const http = require('http');
 const url = require('url');
-const scraper = require('./scraper');
+const fs = require('fs');
+const path = require('path');
+const animeScraper = require('./animeScraper');
 
 const PORT = process.env.PORT || 5000;
 
@@ -43,126 +45,107 @@ const server = http.createServer(async (req, res) => {
   const pathname = parsedUrl.pathname;
 
   try {
-    // 1. Root / Health (JSON API)
+    // 1. Serve Interactive Test Bench UI
+    if (pathname === '/test' || pathname === '/ui' || pathname === '/demo' || (pathname === '/' && (req.headers['accept'] || '').includes('text/html'))) {
+      const htmlPath = path.join(__dirname, 'test_anime.html');
+      if (fs.existsSync(htmlPath)) {
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Access-Control-Allow-Origin': '*'
+        });
+        return res.end(fs.readFileSync(htmlPath, 'utf8'));
+      }
+    }
+
+    // 2. Health & Service Overview
     if (pathname === '/' || pathname === '/health') {
       return sendJson(res, 200, {
         status: 'ok',
-        name: 'Bingr M3U8 Stream Scraper API',
+        service: 'Anime M3U8 Stream Scraper API',
+        clusters: ['beep', 'yuki', 'neko', 'zuna', 'loli'],
         endpoints: [
-          'GET  /search?q={query_or_tmdb_id}',
-          'GET  /movie/:tmdbId',
-          'GET  /movie/:tmdbId/stream?srv={optional_server}',
-          'GET  /tv/:tmdbId',
-          'GET  /tv/:tmdbId/season/:seasonNumber',
-          'GET  /tv/:tmdbId/season/:seasonNumber/episode/:episodeNumber/stream?srv={optional_server}',
-          'GET  /subtitles/:type/:tmdbId?season=1&ep=1',
-          'GET  /skip/:id/:episode',
-          'GET  /sports/matches',
-          'GET  /sports/stream/:source/:matchId',
-          'GET  /servers',
-          'POST /scrape'
+          'GET  /api/anime/search?q={query}',
+          'GET  /api/anime/:id',
+          'GET  /api/anime/:id/episodes?chunk={chunk}',
+          'GET  /api/anime/:id/:episode/streams?type=sub|dub&race=1',
+          'GET  /api/anime/skip/:idMal/:episode',
+          'GET  /api/anime/servers',
+          'GET  /test  (Interactive Web Player & Test Bench)'
         ]
       });
     }
 
-    // 1a. Subtitles API: /subtitles/:type/:id
-    const subMatch = pathname.match(/^\/subtitles\/([a-zA-Z0-9_-]+)\/(\d+)$/);
-    if (subMatch) {
-      const type = subMatch[1];
-      const tmdbId = subMatch[2];
-      const season = parsedUrl.query.season || 1;
-      const episode = parsedUrl.query.ep || parsedUrl.query.episode || 1;
-      const subs = await scraper.getSubtitles(type, tmdbId, season, episode);
-      return sendJson(res, 200, { tmdbId: Number(tmdbId), type, subtitles: subs });
+    // 3. Anime Servers List
+    if (pathname === '/api/anime/servers' || pathname === '/servers') {
+      return sendJson(res, 200, {
+        servers: [
+          { id: 'beep', name: 'Beep', provider: 'AnimeApps CDN' },
+          { id: 'yuki', name: 'Yuki', provider: 'MegaPlay / NexaBloom' },
+          { id: 'neko', name: 'Neko', provider: 'BibiEmbed / Cloudflare Edge' },
+          { id: 'zuna', name: 'Zuna', provider: 'AniWatch / ZokoAnime' },
+          { id: 'loli', name: 'Loli', provider: 'EchoVideo CDN' }
+        ]
+      });
     }
 
-    // 1b. Skip Intro & Outro Timestamps API: /skip/:id or /skip/:id/:episode
-    const skipMatch = pathname.match(/^\/skip\/(\d+)(?:\/(\d+))?$/);
-    if (skipMatch) {
-      const id = skipMatch[1];
-      const episode = skipMatch[2] || parsedUrl.query.ep || 1;
-      const skipTimes = await scraper.getSkipTimes(id, episode);
-      return sendJson(res, 200, { id: Number(id), episode: Number(episode), ...skipTimes });
+    // 4. Anime Search: /api/anime/search?q={query}
+    if (pathname === '/api/anime/search' || pathname === '/search') {
+      const q = parsedUrl.query.q;
+      if (!q) return sendJson(res, 400, { error: 'Query parameter q is required' });
+      const results = await animeScraper.searchAnime(q);
+      return sendJson(res, 200, { count: results.length, results });
     }
 
-    // 1b. Sports Matches List
-    if (pathname === '/sports/matches') {
-      const data = await scraper.getLiveSportsMatches();
+    // 5. Anime Metadata Details: /api/anime/:id
+    const animeDetailsMatch = pathname.match(/^\/api\/anime\/(\d+)$/);
+    if (animeDetailsMatch) {
+      const id = animeDetailsMatch[1];
+      const details = await animeScraper.getAnimeDetails(id);
+      return sendJson(res, 200, details);
+    }
+
+    // 6. Anime Episodes List: /api/anime/:id/episodes?chunk=0
+    const animeEpMatch = pathname.match(/^\/api\/anime\/(\d+)\/episodes$/);
+    if (animeEpMatch) {
+      const id = animeEpMatch[1];
+      const chunk = parsedUrl.query.chunk || 0;
+      const data = await animeScraper.getAnimeEpisodes(id, chunk);
       return sendJson(res, 200, data);
     }
 
-    // 1c. Sports Match Stream
-    const sportStreamMatch = pathname.match(/^\/sports\/stream\/([^\/]+)\/(.+)$/);
-    if (sportStreamMatch) {
-      const source = decodeURIComponent(sportStreamMatch[1]);
-      const matchId = decodeURIComponent(sportStreamMatch[2]);
-      const streamData = await scraper.getMatchStream(source, matchId);
+    // 7. Anime Stream Scrape across 5 Servers: /api/anime/:id/:episode/streams
+    const animeStreamMatch = pathname.match(/^\/api\/anime\/(\d+)\/(\d+)\/streams$/);
+    if (animeStreamMatch) {
+      const anilistId = animeStreamMatch[1];
+      const episode = animeStreamMatch[2];
+      const type = parsedUrl.query.type || 'sub';
+      const title = parsedUrl.query.title || '';
+      const idMal = parsedUrl.query.idMal || null;
+      const shouldRace = parsedUrl.query.race === '1' || parsedUrl.query.race === 'true';
+
+      const streamData = await animeScraper.getAnimeStreams({
+        anilistId,
+        episode: Number(episode),
+        type,
+        title,
+        idMal
+      });
+
+      if (shouldRace && streamData.sources.length) {
+        const race = await animeScraper.speedRaceAnimeServers(streamData.sources);
+        return sendJson(res, 200, { ...streamData, speedRace: race });
+      }
+
       return sendJson(res, 200, streamData);
     }
 
-    // 2. Active Servers List
-    if (pathname === '/servers') {
-      return sendJson(res, 200, { servers: scraper.SERVERS });
-    }
-
-    // 3. Search Movies & Shows
-    if (pathname === '/search') {
-      const q = parsedUrl.query.q;
-      if (!q) return sendJson(res, 400, { error: 'Query parameter q is required' });
-      const results = await scraper.search(q);
-      return sendJson(res, 200, results);
-    }
-
-    // 4. Movie Stream Scrape: /movie/:id/stream
-    const movieStreamMatch = pathname.match(/^\/movie\/(\d+)\/stream$/);
-    if (movieStreamMatch) {
-      const tmdbId = movieStreamMatch[1];
-      const srv = parsedUrl.query.srv;
-      const result = await scraper.scrapeMovie(tmdbId, { srv });
-      return sendJson(res, result.success ? 200 : 404, result);
-    }
-
-    // 5. Movie Metadata: /movie/:id
-    const movieMatch = pathname.match(/^\/movie\/(\d+)$/);
-    if (movieMatch) {
-      const tmdbId = movieMatch[1];
-      const details = await scraper.getMovieDetails(tmdbId);
-      return sendJson(res, 200, details);
-    }
-
-    // 6. TV Episode Stream Scrape: /tv/:id/season/:season/episode/:episode/stream
-    const tvStreamMatch = pathname.match(/^\/tv\/(\d+)\/season\/(\d+)\/episode\/(\d+)\/stream$/);
-    if (tvStreamMatch) {
-      const tmdbId = tvStreamMatch[1];
-      const season = tvStreamMatch[2];
-      const episode = tvStreamMatch[3];
-      const srv = parsedUrl.query.srv;
-      const result = await scraper.scrapeTvEpisode(tmdbId, season, episode, { srv });
-      return sendJson(res, result.success ? 200 : 404, result);
-    }
-
-    // 7. TV Season Episodes List: /tv/:id/season/:season
-    const tvSeasonMatch = pathname.match(/^\/tv\/(\d+)\/season\/(\d+)$/);
-    if (tvSeasonMatch) {
-      const tmdbId = tvSeasonMatch[1];
-      const season = tvSeasonMatch[2];
-      const episodes = await scraper.getTvEpisodes(tmdbId, season);
-      return sendJson(res, 200, { tmdbId: Number(tmdbId), season: Number(season), episodes });
-    }
-
-    // 8. TV Show Metadata: /tv/:id
-    const tvMatch = pathname.match(/^\/tv\/(\d+)$/);
-    if (tvMatch) {
-      const tmdbId = tvMatch[1];
-      const details = await scraper.getTvDetails(tmdbId);
-      return sendJson(res, 200, details);
-    }
-
-    // 9. Universal POST /scrape
-    if (req.method === 'POST' && pathname === '/scrape') {
-      const body = await parseBody(req);
-      const result = await scraper.scrapeStream(body);
-      return sendJson(res, result.success ? 200 : 404, result);
+    // 8. AniSkip Skip Intro / Outro Times: /api/anime/skip/:idMal/:episode
+    const animeSkipMatch = pathname.match(/^\/api\/anime\/skip\/(\d+)\/(\d+)$/);
+    if (animeSkipMatch) {
+      const idMal = animeSkipMatch[1];
+      const episode = animeSkipMatch[2];
+      const skipData = await animeScraper.getSkipTimes(idMal, episode);
+      return sendJson(res, 200, { idMal: Number(idMal), episode: Number(episode), ...skipData });
     }
 
     return sendJson(res, 404, { error: 'Route not found' });
@@ -172,5 +155,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 Bingr M3U8 Scraper Microservice running on http://localhost:${PORT}`);
+  console.log(`🚀 Anime M3U8 Stream Scraper Microservice running on http://localhost:${PORT}`);
+  console.log(`📺 Web Player & API Test Bench: http://localhost:${PORT}/test`);
 });

@@ -9,14 +9,24 @@
  *   play.php?tmdb=1396&type=tv&season=1&ep=1     (TV Episode)
  */
 
-$tmdbId  = isset($_GET['tmdb']) ? preg_replace('/[^0-9]/', '', $_GET['tmdb']) : '1108427';
-$type    = isset($_GET['type']) && $_GET['type'] === 'tv' ? 'tv' : 'movie';
+$isAnime = (isset($_GET['type']) && $_GET['type'] === 'anime') || isset($_GET['anime']) || isset($_GET['anilist']);
+$anilistId = isset($_GET['anilist']) ? preg_replace('/[^0-9]/', '', $_GET['anilist']) : (isset($_GET['anime']) ? preg_replace('/[^0-9]/', '', $_GET['anime']) : ($isAnime ? (isset($_GET['tmdb']) ? $_GET['tmdb'] : '21') : null));
+$tmdbId  = isset($_GET['tmdb']) ? preg_replace('/[^0-9]/', '', $_GET['tmdb']) : ($isAnime ? $anilistId : '1108427');
+$type    = $isAnime ? 'anime' : (isset($_GET['type']) && $_GET['type'] === 'tv' ? 'tv' : 'movie');
 $season  = isset($_GET['season']) ? (int)$_GET['season'] : 1;
 $episode = isset($_GET['ep']) ? (int)$_GET['ep'] : (isset($_GET['episode']) ? (int)$_GET['episode'] : 1);
-$currentSrv = isset($_GET['srv']) ? preg_replace('/[^a-zA-Z0-9_-]/', '', $_GET['srv']) : 's4k';
+$audioMode = isset($_GET['audio']) && in_array(strtolower($_GET['audio']), ['dub', 'sub']) ? strtolower($_GET['audio']) : 'sub';
 
 // Active Server Clusters
-$servers = [
+$animeServers = [
+    'beep' => 'Beep (AnimeApps Direct CDN)',
+    'yuki' => 'Yuki (MegaPlay / NexaBloom Master)',
+    'neko' => 'Neko (BibiEmbed Edge Worker)',
+    'zuna' => 'Zuna (AniWatch / HiAnime Master)',
+    'loli' => 'Loli (EchoVideo Direct)'
+];
+
+$movieTvServers = [
     's4k' => 'PeakStorm 4K (SpeedRace 4K UHD & 1080p Direct)',
     's70' => 'Polaris (Multi-Language Dubs / HLS v7)',
     's40' => 'DarkMatter (StreamRip 1080p Direct)',
@@ -27,6 +37,62 @@ $servers = [
     's30' => 'Nova',
     's31' => 'Orion'
 ];
+
+$servers = $isAnime ? $animeServers : $movieTvServers;
+$currentSrv = isset($_GET['srv']) ? preg_replace('/[^a-zA-Z0-9_-]/', '', $_GET['srv']) : ($isAnime ? 'yuki' : 's4k');
+
+/**
+ * Query Anime Scraper Engine (Ryuu & AnimeSalt)
+ */
+function queryAnimeStreams($anilistId, $episode = 1, $type = 'sub') {
+    // 1. Get token
+    $ch = curl_init('https://hianime.filmu.in/token');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+    $tokRes = curl_exec($ch);
+    curl_close($ch);
+    $tokenJson = json_decode($tokRes, true);
+    $token = $tokenJson['token'] ?? null;
+    if (!$token) return [];
+
+    // 2. Query Ryuu streams
+    $ch = curl_init("https://hianime.filmu.in/ryuu/streams?anilistId={$anilistId}&ep={$episode}&type={$type}");
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 12);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ["x-api-key: {$token}"]);
+    $res = curl_exec($ch);
+    curl_close($ch);
+
+    $json = json_decode($res, true);
+    return $json['streams'] ?? [];
+}
+
+/**
+ * Query AniSkip OP/ED skip times
+ */
+function queryAniSkipTimes($idMal, $episode = 1) {
+    if (!$idMal) return [];
+    $ch = curl_init("https://api.aniskip.com/v2/skip-times/{$idMal}/{$episode}?types[]=op&types[]=ed&episodeLength=0");
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+    $res = curl_exec($ch);
+    curl_close($ch);
+
+    $json = json_decode($res, true);
+    if (!empty($json['found']) && !empty($json['results'])) {
+        $intervals = [];
+        foreach ($json['results'] as $r) {
+            $intervals[] = [
+                'start' => (float)$r['interval']['startTime'],
+                'end'   => (float)$r['interval']['endTime'],
+                'type'  => $r['skipType'] ?? 'op'
+            ];
+        }
+        return $intervals;
+    }
+    return [];
+}
 
 /**
  * Perform cURL request to Bingr API with required bypass headers
@@ -155,8 +221,53 @@ function scrapeSpeedracePHP($type, $id, $title = '', $year = '', $season = 1, $e
 // 1. Scrape stream from selected server
 $sources = [];
 $usedSrv = $currentSrv;
+$skipIntervals = [];
 
-if ($currentSrv === 's4k') {
+if ($isAnime) {
+    // 1. Fetch anime details to get MAL ID for skip intro
+    $animeDetails = queryBingr("/anime/{$anilistId}");
+    $idMal = $animeDetails['idMal'] ?? $anilistId;
+    $mediaTitle = $animeDetails['title'] ?? "Anime #{$anilistId}";
+
+    // 2. Fetch skip times from AniSkip
+    $skipIntervals = queryAniSkipTimes($idMal, $episode);
+
+    // 3. Fetch streams across all 5 servers (beep, yuki, neko, zuna, loli)
+    $rawAnimeStreams = queryAnimeStreams($anilistId, $episode, $audioMode);
+
+    $matchedStream = null;
+    foreach ($rawAnimeStreams as $as) {
+        if (($as['server'] ?? '') === $currentSrv) {
+            $matchedStream = $as;
+            break;
+        }
+    }
+    if (!$matchedStream && !empty($rawAnimeStreams)) {
+        $matchedStream = $rawAnimeStreams[0];
+        $usedSrv = $matchedStream['server'] ?? $currentSrv;
+    }
+
+    if ($matchedStream) {
+        $sources[] = [
+            'url'      => $matchedStream['url'] ?? $matchedStream['proxyUrl'],
+            'proxyUrl' => $matchedStream['proxyUrl'] ?? '',
+            'quality'  => 'Auto',
+            'type'     => 'application/x-mpegurl',
+            'label'    => 'Server ' . strtoupper($matchedStream['server'] ?? 'Anime'),
+            'name'     => strtoupper($matchedStream['server'] ?? 'Anime')
+        ];
+        if (!empty($matchedStream['subtitles']) && is_array($matchedStream['subtitles'])) {
+            foreach ($matchedStream['subtitles'] as $sIdx => $sub) {
+                $subtitles[] = [
+                    'id'    => "anime-sub-{$sIdx}",
+                    'url'   => $sub['url'] ?? '',
+                    'lang'  => $sub['lang'] ?? 'en',
+                    'label' => $sub['label'] ?? ($sub['lang'] ?? 'Subtitles')
+                ];
+            }
+        }
+    }
+} else if ($currentSrv === 's4k') {
     $speedRes = scrapeSpeedracePHP($type, (int)$tmdbId, '', '', $season, $episode);
     if (!empty($speedRes['sources'])) {
         $sources = $speedRes['sources'];
@@ -179,8 +290,8 @@ if ($currentSrv === 's4k') {
     $sources = (isset($streamResult['sources']) && is_array($streamResult['sources'])) ? $streamResult['sources'] : [];
 }
 
-// If selected server failed, try automatic cascade across available servers
-if (empty($sources)) {
+// If selected server failed, try automatic cascade across available servers (for Movies/TV)
+if (!$isAnime && empty($sources)) {
     foreach (array_keys($servers) as $altSrv) {
         if ($altSrv === $currentSrv) continue;
 
@@ -496,29 +607,49 @@ if (empty($subtitles)) {
       if (hls) hls.currentLevel = parseInt(val);
     }
 
+    const skipIntervals = <?= json_encode($skipIntervals ?? []) ?>;
+    const dismissedIntervals = new Set();
+
     function setupSkipIntroEvents() {
       const video = document.getElementById('videoPlayer');
       const skipBtn = document.getElementById('skipIntroBtn');
       const nextBtn = document.getElementById('nextEpisodeBtn');
-      if (!video) return;
-
-      const introStart = 15;
-      const introEnd = 95;
+      if (!video || !skipBtn) return;
 
       video.addEventListener('timeupdate', () => {
         const cur = video.currentTime;
         const dur = video.duration;
 
-        // Show Skip Intro button during intro window
-        if (!hasSkipped && cur >= introStart && cur <= introEnd) {
-          if (skipBtn) skipBtn.classList.remove('hidden');
+        let active = null;
+        if (skipIntervals && skipIntervals.length > 0) {
+          for (const inv of skipIntervals) {
+            if (cur >= inv.start && cur <= inv.end && !dismissedIntervals.has(inv.start)) {
+              active = inv;
+              break;
+            }
+          }
         } else {
-          if (skipBtn) skipBtn.classList.add('hidden');
+          // Fallback heuristic intro window (15s - 95s)
+          if (!hasSkipped && cur >= 15 && cur <= 95) {
+            active = { start: 15, end: 95, type: 'op' };
+          }
+        }
+
+        if (active) {
+          skipBtn.innerHTML = `<span>⏩ Skip ${active.type === 'op' ? 'Intro' : 'Ending'}</span>`;
+          skipBtn.onclick = () => {
+            dismissedIntervals.add(active.start);
+            hasSkipped = true;
+            video.currentTime = active.end;
+            skipBtn.classList.add('hidden');
+          };
+          skipBtn.classList.remove('hidden');
+        } else {
+          skipBtn.classList.add('hidden');
         }
 
         // Show Next Episode button in last 60 seconds
         if (nextBtn && dur > 0 && dur - cur <= 60) {
-          if (skipBtn) skipBtn.classList.add('hidden');
           nextBtn.classList.remove('hidden');
         } else if (nextBtn) {
           nextBtn.classList.add('hidden');

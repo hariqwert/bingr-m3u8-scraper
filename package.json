@@ -1,27 +1,31 @@
 {
-  "name": "bingr-m3u8-scraper",
-  "version": "1.0.0",
-  "description": "Reverse-engineered Bingr M3U8 HLS Stream Scraper for Movies & TV Series with Auto-Cascade",
-  "main": "scraper.js",
+  "name": "bingr-anime-m3u8-scraper",
+  "version": "2.0.0",
+  "description": "High-performance Anime M3U8 HLS Stream Scraper Engine with 5-Server Cluster (beep, yuki, neko, zuna, loli) and AniSkip Skip Intro/Outro integration",
+  "main": "animeScraper.js",
   "type": "commonjs",
   "bin": {
-    "bingr-scraper": "./cli.js"
+    "anime-scraper": "./anime_cli.js"
   },
   "scripts": {
     "start": "node server.js",
-    "cli": "node cli.js"
+    "cli": "node anime_cli.js",
+    "test": "node test_anime_scraper.cjs"
   },
   "keywords": [
-    "bingr",
+    "anime",
+    "scraper",
     "m3u8",
     "hls",
-    "scraper",
-    "tmdb",
-    "stream",
-    "video",
-    "knocw",
-    "nxocw",
-    "darkmatter"
+    "aniskip",
+    "skip-intro",
+    "anilist",
+    "mal",
+    "beep",
+    "yuki",
+    "neko",
+    "zuna",
+    "loli"
   ],
   "author": "hariqwert",
   "license": "MIT"
